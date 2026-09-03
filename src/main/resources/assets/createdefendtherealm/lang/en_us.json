@@ -1,0 +1,13 @@
+{
+  "itemGroup.createdefendtherealm": "Example Mod Tab",
+  "block.createdefendtherealm.example_block": "Example Block",
+  "item.createdefendtherealm.example_item": "Example Item",
+
+  "createdefendtherealm.configuration.title": "Create: Defend the Realm Configs",
+  "createdefendtherealm.configuration.section.createdefendtherealm.common.toml": "Create: Defend the Realm Configs",
+  "createdefendtherealm.configuration.section.createdefendtherealm.common.toml.title": "Create: Defend the Realm Configs",
+  "createdefendtherealm.configuration.items": "Item List",
+  "createdefendtherealm.configuration.logDirtBlock": "Log Dirt Block",
+  "createdefendtherealm.configuration.magicNumberIntroduction": "Magic Number Text",
+  "createdefendtherealm.configuration.magicNumber": "Magic Number"
+}
