@@ -27,6 +27,10 @@ sourceSets.main.resources {
 }
 
 repositories {
+    maven {
+        url = 'https://maven.ryanhcode.dev/releases'
+        content { includeGroup 'dev.ryanhcode.sable-companion' }
+    }
     // Modrinth hosts the exact release artifacts pinned in gradle.properties.
     // exclusiveContent prevents Gradle from resolving unrelated modules here.
     exclusiveContent {
@@ -130,9 +134,13 @@ configurations {
 dependencies {
     implementation "maven.modrinth:LNytGWDc:${create_modrinth_version}"
     implementation "maven.modrinth:T9PomCSv:${sable_modrinth_version}"
+    compileOnly "dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${sable_companion_version}"
     implementation "maven.modrinth:create-aeronautics:${aeronautics_modrinth_version}"
     implementation "maven.modrinth:GWp4jCJj:${create_big_cannons_modrinth_version}"
     implementation "maven.modrinth:B3pb093D:${rpl_modrinth_version}"
+    // Authoring utility available in dev client/server, not a published dependency.
+    localRuntime "maven.modrinth:create-aeronautics-toolgun:${toolgun_modrinth_version}"
+    compileOnly "maven.modrinth:create-aeronautics-toolgun:${toolgun_modrinth_version}"
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.
@@ -180,6 +188,46 @@ publishing {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
+}
+
+// Dependency-free lifecycle regression suite; intentionally does not bootstrap Minecraft.
+sourceSets {
+    verification {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+def verifyEncounter = tasks.register('verifyEncounter', JavaExec) {
+    group = 'verification'
+    description = 'Verify encounter transitions, weighted damage, ownership and recovery invariants.'
+    dependsOn tasks.named('verificationClasses')
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'com.createdtr.defendtherealm.encounter.EncounterChecks'
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = java.toolchain.languageVersion
+    }
+}
+tasks.named('check') { dependsOn verifyEncounter }
+
+tasks.register('inspectVehicle', JavaExec) {
+    group = 'verification'
+    description = 'Read saved vehicle blocks without loading or modifying the world. Pass --args.'
+    dependsOn tasks.named('verificationClasses')
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'com.createdtr.defendtherealm.verification.InspectVehicle'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = java.toolchain.languageVersion }
+}
+
+tasks.register('inspectBlueprint', JavaExec) {
+    group = 'verification'
+    description = 'Decode a Toolgun blueprint without modifying a world. Pass its path with --args.'
+    dependsOn tasks.named('verificationClasses')
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'com.createdtr.defendtherealm.verification.InspectBlueprint'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = java.toolchain.languageVersion }
+    if (providers.gradleProperty('blueprintPath').isPresent()) {
+        args providers.gradleProperty('blueprintPath').get()
+    }
 }
 
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.

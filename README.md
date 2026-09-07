@@ -8,6 +8,14 @@ airship must spawn, fly autonomously, fire a real cannon, survive save/reload,
 and clean itself up safely. The HQ, raids, progression, blueprints, structures,
 and MineColonies integration are later milestones.
 
+The encounter lifecycle, persistence, structural capture, and guarded Toolgun
+blueprint spawn foundation are implemented. Autonomous flight, firing and physical
+cleanup remain unfinished. See [implementation status](docs/MILESTONE_01_IMPLEMENTATION_STATUS.md)
+for available commands and the vehicle handoff requirements.
+
+Run `./gradlew verifyEncounter` for the standalone lifecycle and persistence
+regression suite; `build` also runs it automatically.
+
 ## Prerequisites
 
 - A 64-bit JDK 21. Gradle toolchain auto-download is enabled as a fallback.
@@ -49,7 +57,16 @@ Run `./gradlew runData` whenever a change adds blocks, items, recipes, tags,
 models, loot tables, or other generated data. Always run `compileJava` before
 considering a development task complete.
 
+In `DTR Test World`, the first physical spawn test is:
+
+`/dtr prototype start "Test Ballon" 0 20 0 0 20 -100`
+
 ## Pinned Milestone 01 stack
+
+Development runs also include [Create Aeronautics: Toolgun](https://modrinth.com/mod/create-aeronautics-toolgun)
+for saving and duplicating prototype vehicles. Its release is pinned in
+`gradle.properties` and it is not required by the published addon. Restart the
+development client after changing runtime dependencies.
 
 - Minecraft 1.21.1
 - NeoForge 21.1.249

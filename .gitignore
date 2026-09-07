@@ -28,6 +28,7 @@ replay_pid*
 build/
 run/
 run-*/
+logs/
 src/generated/resources/.cache/
 
 # IDE state
