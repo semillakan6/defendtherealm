@@ -46,7 +46,7 @@ authors="neburelas"
 
 # The description text for the mod (multi line!) (#mandatory)
 description='''
-Example mod description.
+A server-authoritative PvE campaign addon for Create Aeronautics.
 '''
 
 # The [[mixins]] block allows you to declare your mixin config to FML so that it gets loaded.
@@ -84,6 +84,41 @@ config="${mod_id}.mixins.json"
     # This version range declares a minimum of the current minecraft version up to but not including the next major version
     versionRange="${minecraft_version_range}"
     ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="create"
+    type="required"
+    versionRange="[${create_version}]"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="sable"
+    type="required"
+    versionRange="[${sable_version}]"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="aeronautics"
+    type="required"
+    versionRange="[${aeronautics_version}]"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="createbigcannons"
+    type="required"
+    versionRange="[${create_big_cannons_version}]"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="ritchiesprojectilelib"
+    type="required"
+    versionRange="[${rpl_version}]"
+    ordering="AFTER"
     side="BOTH"
 
 # Features are specific properties of the game environment, that you may want to declare you require. This example declares

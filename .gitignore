@@ -22,4 +22,19 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
-*.md
+# Gradle and NeoForge generated state
+.gradle/
+.gradle-user-home/
+build/
+run/
+run-*/
+src/generated/resources/.cache/
+
+# IDE state
+.idea/
+.vscode/
+*.iml
+
+# OS metadata
+.DS_Store
+Thumbs.db
