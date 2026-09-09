@@ -16,6 +16,7 @@ import net.neoforged.neoforge.common.ModConfigSpec;
 // Demonstrates how to use Neo's config APIs
 public class Config {
     private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
+    public static final ModConfigSpec.IntValue SHOT_INTERVAL = BUILDER.comment("Minimum prototype autocannon interval, in ticks.").defineInRange("prototypeShotInterval", 40, 20, 1200);
 
     public static final ModConfigSpec.BooleanValue LOG_DIRT_BLOCK = BUILDER
             .comment("Whether to log the dirt block on common setup")

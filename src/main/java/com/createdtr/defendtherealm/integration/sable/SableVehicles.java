@@ -46,6 +46,9 @@ public final class SableVehicles {
         for (UUID id : encounter.owned()) {
             var candidate = container.getSubLevel(id);
             if (!(candidate instanceof ServerSubLevel ship) || ship.isRemoved()) continue;
+            com.createdtr.defendtherealm.integration.cbc.PrototypeWeapon.stop(
+                    com.createdtr.defendtherealm.integration.cbc.PrototypeWeapon.find(ship));
+            ship.getPlot().kickAllEntities();
             container.removeSubLevel(ship, SubLevelRemovalReason.REMOVED);
             encounter.acknowledgeRemoval(id);
             removed++;

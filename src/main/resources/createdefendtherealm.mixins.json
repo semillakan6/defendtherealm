@@ -2,7 +2,7 @@
   "required": true,
   "package": "com.createdtr.defendtherealm.mixin",
   "compatibilityLevel": "JAVA_21",
-  "mixins": [],
+  "mixins": ["AutocannonShotMixin", "AutocannonInputMixin", "ProjectileOutcomeMixin", "GameTestOriginMixin"],
   "injectors": {
     "defaultRequire": 1
   },

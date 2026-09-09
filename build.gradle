@@ -85,6 +85,9 @@ neoForge {
         // The gametest system is also enabled by default for other run configs under the /test command.
         gameTestServer {
             type = "gameTestServer"
+            if (providers.gradleProperty('dtrAssaultBlueprint').isPresent()) {
+                systemProperty 'dtr.assaultBlueprint', providers.gradleProperty('dtrAssaultBlueprint').get()
+            }
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         }
 
@@ -129,9 +132,22 @@ neoForge {
 // "optional", meaning it will not be pulled by dependents of this mod.
 configurations {
     runtimeClasspath.extendsFrom localRuntime
+    createEmbedded { transitive = false }
+}
+
+// Use exactly the compiled libraries shipped by pinned Create, without vendoring source.
+def extractCreateApis = tasks.register('extractCreateApis', Sync) {
+    from({ configurations.createEmbedded.collect { zipTree(it) } }) {
+        include 'META-INF/jarjar/*.jar'
+        eachFile { path = name }
+        includeEmptyDirs = false
+    }
+    into layout.buildDirectory.dir('create-apis')
 }
 
 dependencies {
+    createEmbedded "maven.modrinth:LNytGWDc:${create_modrinth_version}"
+    compileOnly files(extractCreateApis.map { fileTree(it.destinationDir) { include '*.jar' } })
     implementation "maven.modrinth:LNytGWDc:${create_modrinth_version}"
     implementation "maven.modrinth:T9PomCSv:${sable_modrinth_version}"
     compileOnly "dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${sable_companion_version}"

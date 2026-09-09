@@ -5,10 +5,16 @@ import java.util.Set;
 import java.util.UUID;
 import com.createdtr.defendtherealm.persistence.EncounterSavedData;
 import com.createdtr.defendtherealm.integration.cbc.CbcAmmunitionSnapshot;
+import com.createdtr.defendtherealm.integration.toolgun.BlueprintFacing;
 import com.createdtr.defendtherealm.template.TemplateSavedData;
 import com.createdtr.defendtherealm.template.MachinerySnapshot;
+import com.enxv.aeronauticsstructuretool.blueprint.placement.PlacementTargetMath;
+import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.world.phys.Vec3;
+import org.joml.Quaterniond;
+import org.joml.Vector3d;
 
 /** Standalone verification, independent of Minecraft bootstrap and test engines. */
 public final class EncounterChecks {
@@ -72,10 +78,64 @@ public final class EncounterChecks {
         checkPersistence();
         checkMachinery();
         checkAmmunition();
+        checkAssaultPersistence();
+        checkBlueprintFacing();
         System.out.println("Encounter checks passed: " + checks);
     }
 
     private static Encounter fresh() { return new Encounter(UUID.randomUUID(), Map.of(1L, 1, 2L, 1, 3L, 3)); }
+    private static void checkAssaultPersistence() {
+        var data = new EncounterSavedData();
+        var encounter = fresh();
+        var context = new CompoundTag();
+        context.putBoolean("hqAssault", true);
+        context.putLongArray("route", new long[] {1, 2, 3});
+        context.putInt("routeCursor", 1);
+        context.putLong("nextShot", 1234);
+        context.putInt("repairs", 2);
+        context.putBoolean("targetDestroyedByProjectile", true);
+        context.putLong("targetDestroyedTick", 5000);
+        context.putInt("postImpactTicksRemaining", AssaultController.POST_IMPACT_LINGER_TICKS);
+        data.begin(encounter, context);
+        var saved = data.save(new CompoundTag(), null);
+        var restored = EncounterSavedData.load(saved, null);
+        check(java.util.Arrays.equals(restored.context().getLongArray("route"), new long[] {1, 2, 3}), "Route survives reload");
+        check(restored.context().getInt("routeCursor") == 1 && restored.context().getLong("nextShot") == 1234, "Cursor and cooldown survive reload");
+        check(restored.context().getBoolean("targetDestroyedByProjectile")
+                && restored.context().getLong("targetDestroyedTick") == 5000,
+                "Projectile destruction confirmation survives reload");
+        check(AssaultController.postImpactTicksRemaining(5000, 5000) == 60,
+                "Post-impact linger starts at 60 ticks");
+        check(AssaultController.postImpactTicksRemaining(5059, 5000) == 1,
+                "Post-impact linger retains its final tick");
+        check(AssaultController.postImpactTicksRemaining(5060, 5000) == 0,
+                "Post-impact linger completes after 60 ticks");
+        saved.putInt("schema", 1);
+        check(EncounterSavedData.load(saved, null).encounter().id().equals(encounter.id()), "Legacy schema migrates identity");
+        encounter.terminate(Encounter.Reason.TARGET_DESTROYED);
+        encounter.advance(Encounter.State.COMPLETED);
+        var complete = EncounterSavedData.load(data.save(new CompoundTag(), null), null);
+        check(complete.encounter().reason() == Encounter.Reason.TARGET_DESTROYED && !complete.encounter().combatEnabled(), "HQ victory persists and disables firing");
+    }
+    private static void checkBlueprintFacing() {
+        assertFacing(new Quaterniond(), new Vec3(0, 0, 0), new Vec3(0, 0, -20), "north");
+        assertFacing(new Quaterniond(), new Vec3(0, 0, 0), new Vec3(20, 0, 0), "east");
+        assertFacing(new Quaterniond(), new Vec3(0, 0, 0), new Vec3(0, 0, 20), "south");
+        assertFacing(new Quaterniond(), new Vec3(0, 0, 0), new Vec3(-20, 0, 0), "west");
+        assertFacing(new Quaterniond(), new Vec3(0, 0, 0), new Vec3(20, 0, 20), "diagonal");
+        assertFacing(new Quaterniond().rotateY(Math.toRadians(73)), new Vec3(4, 10, -8),
+                new Vec3(-13, -30, 22), "saved root yaw");
+        expectFailure(() -> BlueprintFacing.rotationDegrees(new Quaterniond(), Vec3.ZERO, new Vec3(0, 20, 0)));
+    }
+    private static void assertFacing(Quaterniond saved, Vec3 spawn, Vec3 target, String description) {
+        int rotation = BlueprintFacing.rotationDegrees(saved, spawn, target);
+        Quaterniond placed = new Quaterniond(saved)
+                .mul(PlacementTargetMath.computeExtraRotation(Direction.UP, rotation));
+        Vector3d forward = placed.transform(new Vector3d(0, 0, -1));
+        Vector3d desired = new Vector3d(target.x - spawn.x, 0, target.z - spawn.z).normalize();
+        forward.y = 0;
+        check(forward.normalize().dot(desired) > 0.9998, "Blueprint faces " + description + " target");
+    }
     private static void checkAmmunition() {
         CompoundTag cannon = new CompoundTag();
         CompoundTag magazine = new CompoundTag();

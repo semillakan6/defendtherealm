@@ -13,7 +13,7 @@ import net.minecraft.world.level.saveddata.SavedData;
 
 /** One world-wide slot, including the last completed record to prevent resurrection. */
 public final class EncounterSavedData extends SavedData {
-    private static final int SCHEMA = 1;
+    private static final int SCHEMA = 2;
     private Encounter encounter;
     private CompoundTag context = new CompoundTag();
 
@@ -61,7 +61,7 @@ public final class EncounterSavedData extends SavedData {
     }
 
     public static EncounterSavedData load(CompoundTag tag, HolderLookup.Provider registries) {
-        if (tag.getInt("schema") != SCHEMA) throw new IllegalArgumentException("Unsupported DTR encounter schema");
+        if (tag.getInt("schema") < 1 || tag.getInt("schema") > SCHEMA) throw new IllegalArgumentException("Unsupported DTR encounter schema");
         EncounterSavedData data = new EncounterSavedData();
         if (!tag.contains("id")) return data;
         var weights = new HashMap<Long, Integer>();

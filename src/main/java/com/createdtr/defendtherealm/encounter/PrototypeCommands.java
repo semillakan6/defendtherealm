@@ -49,7 +49,7 @@ public final class PrototypeCommands {
                         })))))
                 .then(Commands.literal("start").then(Commands.argument("template", StringArgumentType.string())
                     .then(Commands.argument("spawn", BlockPosArgument.blockPos())
-                        .then(Commands.argument("target", BlockPosArgument.blockPos()).executes(ctx -> {
+                        .executes(ctx -> {
                             if (!ModList.get().isLoaded("create_aeronautics_toolgun")) {
                                 ctx.getSource().sendFailure(Component.literal("Toolgun is not loaded; prototype blueprint spawning is unavailable."));
                                 return 0;
@@ -58,7 +58,8 @@ public final class PrototypeCommands {
                                 var result = ToolgunPrototypeSpawner.spawn(ctx.getSource().getPlayerOrException(),
                                         StringArgumentType.getString(ctx, "template"),
                                         BlockPosArgument.getBlockPos(ctx, "spawn"),
-                                        BlockPosArgument.getBlockPos(ctx, "target"));
+                                        com.createdtr.defendtherealm.hq.HqSavedData.get(ctx.getSource().getLevel()).nearest(
+                                                ctx.getSource().getLevel(), BlockPosArgument.getBlockPos(ctx, "spawn")));
                                 ctx.getSource().sendSuccess(() -> Component.literal("Prototype spawned: encounter="
                                         + result.encounterId() + " vehicle=" + result.vehicleId() + " blocks="
                                         + result.blocks() + " ammunition=" + result.ammunition() + " state="
@@ -69,11 +70,12 @@ public final class PrototypeCommands {
                                 ctx.getSource().sendFailure(Component.literal("Prototype not spawned: " + message));
                                 return 0;
                             }
-                        })))))));
+                        }))))));
     }
 
     private static int inspect(CommandSourceStack source) {
         Encounter encounter = EncounterSavedData.get(source.getServer()).encounter();
+        source.sendSuccess(() -> Component.literal("Controller: " + EncounterSavedData.get(source.getServer()).context()), false);
         source.sendSuccess(() -> Component.literal(encounter == null ? "No recorded prototype encounter. Armed integration pending."
             : "Encounter=" + encounter.id() + " state=" + encounter.state() + " reason=" + encounter.reason()
                 + " lostWeight=" + encounter.lostWeight() + "/" + encounter.totalWeight() + " owned=" + encounter.owned()), false);

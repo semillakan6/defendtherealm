@@ -42,6 +42,9 @@ public class CreateDefendtheRealm {
     public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks(MODID);
     // Create a Deferred Register to hold Items which will all be registered under the "createdefendtherealm" namespace
     public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(MODID);
+    public static final DeferredBlock<com.createdtr.defendtherealm.hq.DevHqBlock> DEV_HQ = BLOCKS.register("dev_hq",
+            () -> new com.createdtr.defendtherealm.hq.DevHqBlock(BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_RED).strength(0.5F, 0.5F)));
+    public static final DeferredItem<BlockItem> DEV_HQ_ITEM = ITEMS.registerSimpleBlockItem("dev_hq", DEV_HQ);
     // Create a Deferred Register to hold CreativeModeTabs which will all be registered under the "createdefendtherealm" namespace
     public static final DeferredRegister<CreativeModeTab> CREATIVE_MODE_TABS = DeferredRegister.create(Registries.CREATIVE_MODE_TAB, MODID);
 
@@ -61,6 +64,7 @@ public class CreateDefendtheRealm {
             .icon(() -> EXAMPLE_ITEM.get().getDefaultInstance())
             .displayItems((parameters, output) -> {
                 output.accept(EXAMPLE_ITEM.get());// Add the example item to the tab. For your own tabs, this method is preferred over the event
+                output.accept(DEV_HQ_ITEM.get());
             }).build());
 
     // The constructor for the mod class is the first code that is run when your mod is loaded.

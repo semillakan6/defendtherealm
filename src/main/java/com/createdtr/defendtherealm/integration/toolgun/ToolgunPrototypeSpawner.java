@@ -37,7 +37,7 @@ import org.joml.Vector3d;
 public final class ToolgunPrototypeSpawner {
     private static final int MAX_BLOCKS = 4096;
     private static final int RUNTIME_CLEARANCE = 4;
-    private static final long MIN_AMMUNITION = 20;
+    private static final long MIN_AMMUNITION = 1;
 
     private ToolgunPrototypeSpawner() {}
 
@@ -60,10 +60,26 @@ public final class ToolgunPrototypeSpawner {
         byte[] archive = BlueprintFileRepository.read(directory, templateName);
         NativeBlueprintDocument document = NativeBlueprintReader.read(
                 BlueprintArchiveCodec.decodeCompressedOrRaw(archive));
-        ValidatedBlueprint validated = validate(level, document, spawn);
+        int spawnRotation = BlueprintFacing.rotationDegrees(document.rootOrientation(),
+                net.minecraft.world.phys.Vec3.atCenterOf(spawn), net.minecraft.world.phys.Vec3.atCenterOf(target));
+        ValidatedBlueprint validated = validate(level, document, spawn, spawnRotation);
 
         Encounter encounter = new Encounter(UUID.randomUUID(), validated.weights());
         CompoundTag context = context(player, templateName, level, spawn, target);
+        context.putInt("spawnRotationDegrees", spawnRotation);
+        if (!level.hasChunkAt(target) || !level.getBlockState(target).is(com.createdtr.defendtherealm.CreateDefendtheRealm.DEV_HQ.get()))
+            throw new IOException("Target must be a loaded development HQ");
+        var route = com.createdtr.defendtherealm.encounter.AssaultController.initialRoute(level, encounter.id(),
+                net.minecraft.world.phys.Vec3.atCenterOf(spawn), target, validated.envelope());
+        if (route.isEmpty()) throw new IOException("No loaded, clear air route to the HQ; placement was not attempted");
+        // This route proves feasibility before placement. The live route begins at
+        // Sable's actual logical pose, whose anchor need not equal the requested block.
+        context.putInt("preflightRouteNodes", route.size());
+        context.putDouble("navRadius", validated.envelope().radius());
+        context.putDouble("navBelow", validated.envelope().below());
+        context.putDouble("navAbove", validated.envelope().above());
+        context.putDouble("progressDistance", Double.MAX_VALUE);
+        context.putLong("lastProgress", level.getGameTime());
         data.begin(encounter, context);
         encounter.advance(Encounter.State.SPAWNING);
         data.setDirty();
@@ -88,7 +104,7 @@ public final class ToolgunPrototypeSpawner {
         try {
             var result = NativeBlueprintPlacementService.place(level, spawn, Direction.UP, templateName, archive,
                     spawn.getX() + 0.5D, spawn.getY() + 0.5D, spawn.getZ() + 0.5D,
-                    0, 100, 0, 0, 0, PlacementSnapMode.HIT, null,
+                    spawnRotation, 100, 0, 0, 0, PlacementSnapMode.HIT, null,
                     BlueprintVerticalPlacement.unchanged(), player.getUUID(), observer);
             if (result.rootSubLevel() == null) throw new IOException("Toolgun did not return a root vehicle");
 
@@ -119,7 +135,8 @@ public final class ToolgunPrototypeSpawner {
         }
     }
 
-    private static ValidatedBlueprint validate(ServerLevel level, NativeBlueprintDocument document, BlockPos spawn)
+    private static ValidatedBlueprint validate(ServerLevel level, NativeBlueprintDocument document, BlockPos spawn,
+                                               int spawnRotation)
             throws IOException {
         if (!NativeBlueprintFormat.isSupported(document.format())) {
             throw new IOException("Unsupported Toolgun blueprint format: " + document.format());
@@ -153,8 +170,18 @@ public final class ToolgunPrototypeSpawner {
                 throw new IOException("Blueprint contains a duplicate integrity position");
             }
         }
-        validateClearance(level, document, saved.localAnchor(), blocks, spawn);
-        return new ValidatedBlueprint(Map.copyOf(weights), ammunition);
+        validateClearance(level, document, saved.localAnchor(), blocks, spawn, spawnRotation);
+        double radius = 0, below = 0, above = 0;
+        Quaterniond placedOrientation = new Quaterniond(document.rootOrientation())
+                .mul(PlacementTargetMath.computeExtraRotation(Direction.UP, spawnRotation)).normalize();
+        for (var block : blocks) {
+            Vector3d offset = new Vector3d(block.center()).sub(saved.localAnchor());
+            placedOrientation.transform(offset);
+            radius = Math.max(radius, Math.hypot(offset.x, offset.z));
+            below = Math.max(below, -offset.y); above = Math.max(above, offset.y);
+        }
+        return new ValidatedBlueprint(Map.copyOf(weights), ammunition,
+                new com.createdtr.defendtherealm.navigation.VehicleRoutePlanner.Envelope(radius + 4, below + 4, above + 4));
     }
 
     private static boolean isFunctional(ResourceLocation id) {
@@ -166,13 +193,14 @@ public final class ToolgunPrototypeSpawner {
     }
 
     private static void validateClearance(ServerLevel level, NativeBlueprintDocument document, Vector3d localAnchor,
-                                          java.util.List<PlotBlockDataReader.PlotBlock> blocks, BlockPos spawn)
+                                          java.util.List<PlotBlockDataReader.PlotBlock> blocks, BlockPos spawn,
+                                          int spawnRotation)
             throws IOException {
         Vector3d target = PlacementTargetMath.computePlacementTarget(spawn, Direction.UP,
                 spawn.getX() + 0.5D, spawn.getY() + 0.5D, spawn.getZ() + 0.5D,
                 PlacementSnapMode.HIT, 0, 0, 0);
         Quaterniond orientation = new Quaterniond(document.rootOrientation())
-                .mul(PlacementTargetMath.computeExtraRotation(Direction.UP, 0)).normalize();
+                .mul(PlacementTargetMath.computeExtraRotation(Direction.UP, spawnRotation)).normalize();
         double minX = Double.POSITIVE_INFINITY, minY = Double.POSITIVE_INFINITY, minZ = Double.POSITIVE_INFINITY;
         double maxX = Double.NEGATIVE_INFINITY, maxY = Double.NEGATIVE_INFINITY, maxZ = Double.NEGATIVE_INFINITY;
         for (var block : blocks) {
@@ -199,6 +227,8 @@ public final class ToolgunPrototypeSpawner {
     private static CompoundTag context(ServerPlayer player, String templateName, ServerLevel level,
                                        BlockPos spawn, BlockPos target) {
         CompoundTag context = new CompoundTag();
+        context.putBoolean("hqAssault", true);
+        context.putString("navigationProfile", "hover_airship");
         context.putUUID("owner", player.getUUID());
         context.putString("template", BlueprintFileRepository.normalizeName(templateName));
         context.putString("dimension", level.dimension().location().toString());
@@ -218,5 +248,6 @@ public final class ToolgunPrototypeSpawner {
         return message == null || message.isBlank() ? throwable.getClass().getSimpleName() : message;
     }
 
-    private record ValidatedBlueprint(Map<Long, Integer> weights, long ammunition) {}
+    private record ValidatedBlueprint(Map<Long, Integer> weights, long ammunition,
+            com.createdtr.defendtherealm.navigation.VehicleRoutePlanner.Envelope envelope) {}
 }
