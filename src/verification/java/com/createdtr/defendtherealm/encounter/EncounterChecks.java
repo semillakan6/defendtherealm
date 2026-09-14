@@ -6,6 +6,18 @@ import java.util.UUID;
 import com.createdtr.defendtherealm.persistence.EncounterSavedData;
 import com.createdtr.defendtherealm.integration.cbc.CbcAmmunitionSnapshot;
 import com.createdtr.defendtherealm.integration.toolgun.BlueprintFacing;
+import com.createdtr.defendtherealm.combat.VehicleCombatProfile;
+import com.createdtr.defendtherealm.combat.VehicleCombatProfiles;
+import com.createdtr.defendtherealm.combat.VehicleFamily;
+import com.createdtr.defendtherealm.combat.WeaponBehavior;
+import com.createdtr.defendtherealm.combat.WeaponProfile;
+import com.createdtr.defendtherealm.combat.WeaponRangeProfile;
+import com.createdtr.defendtherealm.combat.WeaponRuntime;
+import com.createdtr.defendtherealm.combat.BallisticFireControl;
+import com.createdtr.defendtherealm.combat.TrajectoryProfile;
+import com.createdtr.defendtherealm.combat.TrajectoryType;
+import com.google.gson.JsonParser;
+import net.minecraft.resources.ResourceLocation;
 import com.createdtr.defendtherealm.template.TemplateSavedData;
 import com.createdtr.defendtherealm.template.MachinerySnapshot;
 import com.enxv.aeronauticsstructuretool.blueprint.placement.PlacementTargetMath;
@@ -80,6 +92,9 @@ public final class EncounterChecks {
         checkAmmunition();
         checkAssaultPersistence();
         checkBlueprintFacing();
+        checkPhysicalIdentityAndDefeatTimer();
+        checkTargetCorridor();
+        checkCombatProfiles();
         System.out.println("Encounter checks passed: " + checks);
     }
 
@@ -93,6 +108,14 @@ public final class EncounterChecks {
         context.putInt("routeCursor", 1);
         context.putLong("nextShot", 1234);
         context.putInt("repairs", 2);
+        context.putBoolean("recoveryPending", true);
+        context.putString("tacticalPhase", "LOS_SEARCH");
+        context.putInt("orbitAttempts", 7);
+        context.putInt("breachShots", 2);
+        context.putLongArray("maneuverRoute", new long[] {4, 5, 6});
+        context.putInt("maneuverCursor", 2);
+        context.putLong("maneuverLastProgress", 120);
+        context.putDouble("maneuverProgressDistance", 9.5);
         context.putBoolean("targetDestroyedByProjectile", true);
         context.putLong("targetDestroyedTick", 5000);
         context.putInt("postImpactTicksRemaining", AssaultController.POST_IMPACT_LINGER_TICKS);
@@ -101,6 +124,16 @@ public final class EncounterChecks {
         var restored = EncounterSavedData.load(saved, null);
         check(java.util.Arrays.equals(restored.context().getLongArray("route"), new long[] {1, 2, 3}), "Route survives reload");
         check(restored.context().getInt("routeCursor") == 1 && restored.context().getLong("nextShot") == 1234, "Cursor and cooldown survive reload");
+        check(restored.context().getBoolean("recoveryPending")
+                && restored.context().getString("tacticalPhase").equals("LOS_SEARCH")
+                && restored.context().getInt("orbitAttempts") == 7
+                && restored.context().getInt("breachShots") == 2,
+                "Recovery and tactical state survive reload");
+        check(java.util.Arrays.equals(restored.context().getLongArray("maneuverRoute"), new long[] {4, 5, 6})
+                && restored.context().getInt("maneuverCursor") == 2
+                && restored.context().getLong("maneuverLastProgress") == 120
+                && restored.context().getDouble("maneuverProgressDistance") == 9.5,
+                "Tactical route progress survives reload");
         check(restored.context().getBoolean("targetDestroyedByProjectile")
                 && restored.context().getLong("targetDestroyedTick") == 5000,
                 "Projectile destruction confirmation survives reload");
@@ -126,6 +159,95 @@ public final class EncounterChecks {
         assertFacing(new Quaterniond().rotateY(Math.toRadians(73)), new Vec3(4, 10, -8),
                 new Vec3(-13, -30, 22), "saved root yaw");
         expectFailure(() -> BlueprintFacing.rotationDegrees(new Quaterniond(), Vec3.ZERO, new Vec3(0, 20, 0)));
+    }
+    private static void checkPhysicalIdentityAndDefeatTimer() {
+        var canonical = com.createdtr.defendtherealm.integration.sable.EncounterIntegrity.canonical(
+                new net.minecraft.core.BlockPos(101, 42, -70), new net.minecraft.core.BlockPos(100, 40, -75));
+        check(canonical.equals(new net.minecraft.core.BlockPos(1, 2, 5)),
+                "Physical plot coordinates map back to canonical integrity identity");
+        var data = new EncounterSavedData();
+        var encounter = fresh();
+        var context = new CompoundTag();
+        context.putLong("defeatTick", 1200);
+        context.putInt("defeatTicksRemaining", 275);
+        context.putLongArray("forcedChunks", new long[] {11, 12, 13});
+        data.begin(encounter, context);
+        var saved = data.save(new CompoundTag(), null);
+        check(saved.getInt("schema") == 5, "Current encounter schema is version 5");
+        var loaded = EncounterSavedData.load(saved, null).context();
+        check(loaded.getLong("defeatTick") == 1200 && loaded.getInt("defeatTicksRemaining") == 275,
+                "Defeat fall resumes from persisted elapsed time");
+        check(java.util.Arrays.equals(loaded.getLongArray("forcedChunks"), new long[] {11, 12, 13}),
+                "Chunk ticket ledger survives reload");
+        saved.putInt("schema", 2);
+        check(EncounterSavedData.load(saved, null).context().getLong("defeatTick") == 1200,
+                "Schema 2 context migrates into schema 5");
+    }
+    private static void checkTargetCorridor() {
+        check(AssaultTargeting.qualifies(new Vec3(50, 0, 20), Vec3.ZERO, new Vec3(100, 0, 0)),
+                "Player near assault corridor qualifies");
+        check(AssaultTargeting.qualifies(new Vec3(100, 0, 100), Vec3.ZERO, new Vec3(100, 0, 0)),
+                "Player inside HQ perimeter qualifies");
+        check(!AssaultTargeting.qualifies(new Vec3(0, 0, 200), Vec3.ZERO, new Vec3(100, 0, 0)),
+                "Distant player outside corridor does not qualify");
+    }
+    private static void checkCombatProfiles() {
+        var range = new WeaponRangeProfile(8, 28, 40, 96, 1.5);
+        check(!range.contains(7.99) && range.contains(8) && range.contains(96) && !range.contains(96.01),
+                "Weapon range has inclusive physical limits");
+        check(range.preferred(28) && range.preferred(40) && !range.preferred(41),
+                "Preferred engagement band is distinct from maximum range");
+        var trajectory = new TrajectoryProfile(TrajectoryType.DIRECT_LOW_ARC, 4, 0.025, 0.01, 80);
+        var weapon = new WeaponProfile("main_turret", WeaponBehavior.INDEPENDENT_TURRET, range,
+                trajectory, true, 3, null);
+        var profile = new VehicleCombatProfile("test_balloon", "Test Ballon", VehicleFamily.HOVER_AIRSHIP,
+                "hover_airship", java.util.List.of(weapon));
+        CompoundTag context = new CompoundTag();
+        WeaponRuntime.initialize(context, profile);
+        check(context.getString("vehicleFamily").equals("HOVER_AIRSHIP")
+                && WeaponRuntime.state(context, "main_turret").getDouble("maximumRange") == 96,
+                "Vehicle family and per-hardpoint ranges persist");
+        CompoundTag state = WeaponRuntime.state(context, "main_turret");
+        check(WeaponRuntime.incrementBlocker(state, 42L) == 1
+                && WeaponRuntime.incrementBlocker(state, 42L) == 2
+                && WeaponRuntime.incrementBlocker(state, 84L) == 1,
+                "Per-block diagnostics remain independent");
+        check(AssaultController.breachAllowed(0, weapon.breachShotLimit())
+                && AssaultController.breachAllowed(2, weapon.breachShotLimit())
+                && !AssaultController.breachAllowed(3, weapon.breachShotLimit())
+                && !AssaultController.breachAllowed(4, weapon.breachShotLimit()),
+                "Breaching budget is capped across changing blocker blocks");
+        check(AssaultController.reached(Vec3.ZERO, new Vec3(2.99, 0, 0))
+                && !AssaultController.reached(Vec3.ZERO, new Vec3(3, 0, 0)),
+                "Route completion and engagement share one arrival tolerance");
+        expectFailure(() -> new VehicleCombatProfile("boat", "Boat", VehicleFamily.SURFACE_SHIP,
+                "hover_airship", java.util.List.of(weapon)));
+        String json = """
+                {"id":"parsed_balloon","template":"Parsed","vehicle_family":"hover_airship",
+                 "navigation_profile":"hover_airship","weapons":[{"id":"gun","behavior":"independent_turret",
+                 "range":{"minimum":1,"preferred_minimum":10,"preferred_maximum":20,"maximum":50,
+                 "maximum_firing_speed":2},"trajectory":{"type":"direct_low_arc","projectile_speed":4,
+                 "gravity_per_tick":0.025,"drag_per_tick":0.01,"maximum_flight_ticks":80},"breach_capable":false}]}
+                """;
+        check(VehicleCombatProfiles.parse(ResourceLocation.fromNamespaceAndPath("test", "vehicle_profiles/test.json"),
+                JsonParser.parseString(json).getAsJsonObject()).primaryWeapon().range().maximum() == 50,
+                "Data-driven combat profile parses");
+        expectFailure(() -> new WeaponRangeProfile(20, 10, 30, 40, 1));
+
+        var low = BallisticFireControl.solve(Vec3.ZERO, new Vec3(40, 0, 0), Vec3.ZERO, trajectory);
+        var high = BallisticFireControl.solve(Vec3.ZERO, new Vec3(40, 0, 0), Vec3.ZERO,
+                new TrajectoryProfile(TrajectoryType.BALLISTIC_HIGH_ARC, 4, 0.025, 0, 1200));
+        check(low.reachable() && high.reachable() && low.launchDirection().y > 0
+                        && high.launchDirection().y > low.launchDirection().y,
+                "Fire control exposes physically distinct low and high arcs");
+        check(low.predictedImpact().distanceTo(new Vec3(40, 0, 0)) < 0.01,
+                "Low arc reaches a stationary target");
+        var lead = BallisticFireControl.solve(Vec3.ZERO, new Vec3(40, 0, 0), new Vec3(0, 0, 0.1), trajectory);
+        check(lead.reachable() && lead.predictedImpact().z > 0.5,
+                "Fire control leads a moving target");
+        check(!BallisticFireControl.solve(Vec3.ZERO, new Vec3(100, 100, 0), Vec3.ZERO,
+                new TrajectoryProfile(TrajectoryType.DIRECT_LOW_ARC, 1, 0.1, 0, 200)).reachable(),
+                "Unreachable ballistic targets fail closed");
     }
     private static void assertFacing(Quaterniond saved, Vec3 spawn, Vec3 target, String description) {
         int rotation = BlueprintFacing.rotationDegrees(saved, spawn, target);

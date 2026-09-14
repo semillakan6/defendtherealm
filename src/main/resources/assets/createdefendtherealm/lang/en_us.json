@@ -1,5 +1,7 @@
 {
   "block.createdefendtherealm.dev_hq": "Development HQ",
+  "block.createdefendtherealm.dev_defense_target": "Development Defense Target",
+  "block.createdefendtherealm.dev_infrastructure_target": "Development Infrastructure Target",
   "itemGroup.createdefendtherealm": "Example Mod Tab",
   "block.createdefendtherealm.example_block": "Example Block",
   "item.createdefendtherealm.example_item": "Example Item",

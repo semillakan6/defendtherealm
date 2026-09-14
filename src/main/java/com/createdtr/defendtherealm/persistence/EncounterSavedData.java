@@ -13,7 +13,7 @@ import net.minecraft.world.level.saveddata.SavedData;
 
 /** One world-wide slot, including the last completed record to prevent resurrection. */
 public final class EncounterSavedData extends SavedData {
-    private static final int SCHEMA = 2;
+    private static final int SCHEMA = 5;
     private Encounter encounter;
     private CompoundTag context = new CompoundTag();
 
@@ -78,6 +78,20 @@ public final class EncounterSavedData extends SavedData {
         data.encounter = Encounter.restore(tag.getUUID("id"), weights, lost, owned,
                 Encounter.State.valueOf(tag.getString("state")), Encounter.Reason.valueOf(tag.getString("reason")));
         data.context = tag.getCompound("context").copy();
+        if (tag.getInt("schema") < 5 && data.context.getBoolean("hqAssault")) {
+            data.context.putString("vehicleFamily", "HOVER_AIRSHIP");
+            data.context.putString("combatProfile", "test_balloon");
+            String phase = data.context.getString("tacticalPhase");
+            if (phase.equals("LOS_SEARCH") || phase.equals("BREACHING")) {
+                // Legacy tactical paths replaced the strategic HQ path and
+                // cannot be distinguished after a restart. Rebuild safely.
+                data.context.remove("route");
+                data.context.remove("routeCursor");
+            }
+            data.context.remove("maneuverRoute");
+            data.context.remove("maneuverCursor");
+            data.context.putBoolean("recoveryPending", true);
+        }
         return data;
     }
 }

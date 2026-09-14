@@ -74,8 +74,19 @@ neoForge {
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         }
 
+        // Keep multiplayer validation clients isolated. Sharing a game directory
+        // makes their config file watchers rewrite the same files concurrently.
+        clientTwo {
+            client()
+            gameDirectory = project.file('run-client-two')
+            programArgument '--username'
+            programArgument 'DevTwo'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+
         server {
             server()
+            gameDirectory = project.file('run-server')
             programArgument '--nogui'
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         }
@@ -85,6 +96,10 @@ neoForge {
         // The gametest system is also enabled by default for other run configs under the /test command.
         gameTestServer {
             type = "gameTestServer"
+            // Never share saves, configs, logs, or Sable native state with an
+            // interactive client. Concurrent processes otherwise race the
+            // config watcher and invalidate physics acceptance evidence.
+            gameDirectory = project.file('run-gametest')
             if (providers.gradleProperty('dtrAssaultBlueprint').isPresent()) {
                 systemProperty 'dtr.assaultBlueprint', providers.gradleProperty('dtrAssaultBlueprint').get()
             }
@@ -93,8 +108,7 @@ neoForge {
 
         data {
             data()
-            // example of overriding the workingDirectory set in configureEach above, uncomment if you want to use it
-            // gameDirectory = project.file('run-data')
+            gameDirectory = project.file('run-data')
 
             // Specify the modid for data generation, where to output the resulting resource, and where to look for existing resources.
             programArguments.addAll '--mod', project.mod_id, '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()

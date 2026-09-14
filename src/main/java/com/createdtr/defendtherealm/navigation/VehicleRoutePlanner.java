@@ -1,5 +1,7 @@
 package com.createdtr.defendtherealm.navigation;
 
+import com.createdtr.defendtherealm.combat.VehicleFamily;
+
 import java.util.List;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -12,8 +14,22 @@ public interface VehicleRoutePlanner {
                 throw new IllegalArgumentException("Invalid vehicle envelope");
         }
     }
+    VehicleFamily family();
     List<BlockPos> plan(ServerLevel level, BlockPos start, BlockPos goal, Envelope envelope);
 
+    default boolean hasClearance(ServerLevel level, Vec3 point, Envelope envelope) {
+        throw new UnsupportedOperationException("Clearance is not implemented for " + family());
+    }
+
+    default boolean hasClearSegment(ServerLevel level, Vec3 from, Vec3 to, Envelope envelope) {
+        int steps = Math.max(1, (int) Math.ceil(from.distanceTo(to) * 2));
+        if (steps > 2048) return false;
+        for (int i = 0; i <= steps; i++)
+            if (!hasClearance(level, from.lerp(to, (double) i / steps), envelope)) return false;
+        return true;
+    }
+
+    /** Legacy forwarding helpers retained while schema-4 routes migrate. */
     static boolean clear(ServerLevel level, Vec3 point, Envelope e) {
         BlockPos min = BlockPos.containing(point.x - e.radius(), point.y - e.below(), point.z - e.radius());
         BlockPos max = BlockPos.containing(point.x + e.radius(), point.y + e.above(), point.z + e.radius());

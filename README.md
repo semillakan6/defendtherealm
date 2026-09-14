@@ -8,10 +8,11 @@ airship must spawn, fly autonomously, fire a real cannon, survive save/reload,
 and clean itself up safely. The HQ, raids, progression, blueprints, structures,
 and MineColonies integration are later milestones.
 
-The encounter lifecycle, persistence, structural capture, and guarded Toolgun
-blueprint spawn foundation are implemented. Autonomous flight, firing and physical
-cleanup remain unfinished. See [implementation status](docs/MILESTONE_01_IMPLEMENTATION_STATUS.md)
-for available commands and the vehicle handoff requirements.
+The complete prototype implementation is present: bundled vehicle placement,
+autonomous flight, real CBC firing, damage/fragment tracking, persistence,
+bounded loading, defeat and cleanup. Automated physics tests pass; the manual
+two-client and real restart acceptance matrix remains. See [implementation
+status](docs/MILESTONE_01_IMPLEMENTATION_STATUS.md).
 
 Run `./gradlew verifyEncounter` for the standalone lifecycle and persistence
 regression suite; `build` also runs it automatically.
@@ -34,6 +35,7 @@ On Windows PowerShell:
 .\gradlew.bat compileJava
 .\gradlew.bat build
 .\gradlew.bat runClient
+.\gradlew.bat runClientTwo
 .\gradlew.bat runServer
 ```
 
@@ -43,6 +45,7 @@ On Linux or macOS:
 ./gradlew compileJava
 ./gradlew build
 ./gradlew runClient
+./gradlew runClientTwo
 ./gradlew runServer
 ```
 
@@ -50,16 +53,20 @@ The first run downloads Gradle, the Java 21 toolchain when necessary, Minecraft
 development artifacts, and the pinned mod stack. Run directories and local
 Gradle caches are intentionally ignored by Git.
 
-`runServer` creates `run/eula.txt` on its first launch. Review Mojang's EULA and
+`runServer` creates `run-server/eula.txt` on its first launch. Review Mojang's EULA and
 set `eula=true` yourself before launching it again.
+
+Client, dedicated-server, GameTest, and data-generation state are isolated in
+`run`, `run-server`, `run-gametest`, and `run-data` respectively. Run the physical
+regression suite with `./gradlew runGameTestServer`.
 
 Run `./gradlew runData` whenever a change adds blocks, items, recipes, tags,
 models, loot tables, or other generated data. Always run `compileJava` before
 considering a development task complete.
 
-In `DTR Test World`, the first physical spawn test is:
+In `DTR Test World`, place a development HQ and run the bundled fixture with:
 
-`/dtr prototype start "Test Ballon" 0 20 0 0 20 -100`
+`/dtr prototype fixture 0 20 0`
 
 ## Pinned Milestone 01 stack
 
@@ -76,9 +83,9 @@ development client after changing runtime dependencies.
 - Create Big Cannons 5.11.7
 - Ritchie's Projectile Library 2.1.2
 
-This is the initial compatibility candidate, not a claim that Milestone 01 has
-passed. Startup, physics, cannon firing, destruction, persistence, cleanup, and
-two-client dedicated-server behavior still require direct validation.
+The pinned stack passes compilation, build, data generation, and the disposable
+server physics suite. Physical restart recovery and two-client dedicated-server
+behavior still require the recorded manual acceptance run.
 
 ## Project documents
 

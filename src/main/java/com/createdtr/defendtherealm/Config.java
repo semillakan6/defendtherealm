@@ -1,43 +1,34 @@
 package com.createdtr.defendtherealm;
 
-import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
-
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLocation;
-import net.minecraft.world.item.Item;
-import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
-// An example config class. This is not required, but it's a good idea to have one to keep your config organized.
-// Demonstrates how to use Neo's config APIs
-public class Config {
+/** Server-authoritative prototype tuning. */
+public final class Config {
     private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
-    public static final ModConfigSpec.IntValue SHOT_INTERVAL = BUILDER.comment("Minimum prototype autocannon interval, in ticks.").defineInRange("prototypeShotInterval", 40, 20, 1200);
 
-    public static final ModConfigSpec.BooleanValue LOG_DIRT_BLOCK = BUILDER
-            .comment("Whether to log the dirt block on common setup")
-            .define("logDirtBlock", true);
+    public static final ModConfigSpec.IntValue SHOT_INTERVAL = BUILDER
+            .comment("Minimum prototype autocannon interval, in ticks.")
+            .defineInRange("prototypeShotInterval", 40, 20, 1200);
+    public static final ModConfigSpec.IntValue POST_IMPACT_LINGER = BUILDER
+            .comment("Ticks to hold after an attributed projectile destroys the HQ.")
+            .defineInRange("prototypePostImpactLinger", 60, 0, 1200);
+    public static final ModConfigSpec.DoubleValue DEFEAT_DESCENT_SPEED = BUILDER
+            .comment("Maximum assisted descent speed after defeat, in blocks per second.")
+            .defineInRange("prototypeDefeatDescentSpeed", 3.0D, 0.25D, 10.0D);
+    public static final ModConfigSpec.IntValue DEFEAT_GROUNDING_TIMEOUT = BUILDER
+            .comment("Maximum ticks to wait for a defeated vehicle to reach ground.")
+            .defineInRange("prototypeDefeatGroundingTimeout", 400, 20, 2400);
+    public static final ModConfigSpec.IntValue RECOVERY_GRACE_TICKS = BUILDER
+            .comment("Ticks to wait for Sable/Create nested machinery after loading an encounter.")
+            .defineInRange("prototypeRecoveryGraceTicks", 200, 20, 1200);
+    public static final ModConfigSpec.IntValue LOS_SEARCH_INTERVAL = BUILDER
+            .comment("Ticks spent evaluating each alternate firing position.")
+            .defineInRange("prototypeLosSearchInterval", 20, 5, 200);
+    public static final ModConfigSpec.IntValue BREACH_SHOT_LIMIT = BUILDER
+            .comment("Real shots attempted against an obstruction before changing targets.")
+            .defineInRange("prototypeBreachShotLimit", 3, 1, 16);
 
-    public static final ModConfigSpec.IntValue MAGIC_NUMBER = BUILDER
-            .comment("A magic number")
-            .defineInRange("magicNumber", 42, 0, Integer.MAX_VALUE);
+    public static final ModConfigSpec SPEC = BUILDER.build();
 
-    public static final ModConfigSpec.ConfigValue<String> MAGIC_NUMBER_INTRODUCTION = BUILDER
-            .comment("What you want the introduction message to be for the magic number")
-            .define("magicNumberIntroduction", "The magic number is... ");
-
-    // a list of strings that are treated as resource locations for items
-    public static final ModConfigSpec.ConfigValue<List<? extends String>> ITEM_STRINGS = BUILDER
-            .comment("A list of items to log on common setup.")
-            .defineListAllowEmpty("items", List.of("minecraft:iron_ingot"), () -> "", Config::validateItemName);
-
-    static final ModConfigSpec SPEC = BUILDER.build();
-
-    private static boolean validateItemName(final Object obj) {
-        return obj instanceof String itemName && BuiltInRegistries.ITEM.containsKey(ResourceLocation.parse(itemName));
-    }
+    private Config() {}
 }

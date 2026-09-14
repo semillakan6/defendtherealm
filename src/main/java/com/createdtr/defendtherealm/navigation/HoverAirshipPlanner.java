@@ -1,5 +1,7 @@
 package com.createdtr.defendtherealm.navigation;
 
+import com.createdtr.defendtherealm.combat.VehicleFamily;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -16,9 +18,26 @@ import net.minecraft.world.phys.Vec3;
 
 /** Reuses vanilla A*; evaluator owns vehicle clearance and never adds the adapter mob to the world. */
 public final class HoverAirshipPlanner implements VehicleRoutePlanner {
+    @Override public VehicleFamily family() { return VehicleFamily.HOVER_AIRSHIP; }
+
+    @Override public boolean hasClearance(ServerLevel level, Vec3 point, Envelope e) {
+        return clearAirship(level, point, e);
+    }
+
+    private static boolean clearAirship(ServerLevel level, Vec3 point, Envelope e) {
+        BlockPos min = BlockPos.containing(point.x - e.radius(), point.y - e.below(), point.z - e.radius());
+        BlockPos max = BlockPos.containing(point.x + e.radius(), point.y + e.above(), point.z + e.radius());
+        if (min.getY() < level.getMinBuildHeight() || max.getY() >= level.getMaxBuildHeight()) return false;
+        for (BlockPos pos : BlockPos.betweenClosed(min, max)) {
+            if (!level.hasChunkAt(pos) || !level.getWorldBorder().isWithinBounds(pos)) return false;
+            if (!level.getFluidState(pos).isEmpty() || !level.getBlockState(pos).getCollisionShape(level, pos).isEmpty()) return false;
+        }
+        return true;
+    }
+
     @Override public List<BlockPos> plan(ServerLevel level, BlockPos start, BlockPos goal, Envelope envelope) {
         if (start.distSqr(goal) > 512D * 512D) return List.of();
-        if (VehicleRoutePlanner.clearSegment(level, Vec3.atCenterOf(start), Vec3.atCenterOf(goal), envelope)) {
+        if (hasClearSegment(level, Vec3.atCenterOf(start), Vec3.atCenterOf(goal), envelope)) {
             List<BlockPos> direct = new ArrayList<>();
             int steps = Math.max(1, (int) Math.ceil(Math.sqrt(start.distSqr(goal)) / 4));
             for (int i = 0; i <= steps; i++) direct.add(BlockPos.containing(Vec3.atCenterOf(start).lerp(Vec3.atCenterOf(goal), (double) i / steps)));
@@ -54,7 +73,7 @@ public final class HoverAirshipPlanner implements VehicleRoutePlanner {
         private boolean clear(BlockPos p) {
             return p.getX() >= min.getX() && p.getX() <= max.getX() && p.getY() >= min.getY() && p.getY() <= max.getY()
                     && p.getZ() >= min.getZ() && p.getZ() <= max.getZ()
-                    && clearance.computeIfAbsent(p.immutable(), key -> VehicleRoutePlanner.clear(level, Vec3.atCenterOf(key), envelope));
+                    && clearance.computeIfAbsent(p.immutable(), key -> clearAirship(level, Vec3.atCenterOf(key), envelope));
         }
         @Override public Node getStart() { return getNode(start); }
         @Override public Target getTarget(double x, double y, double z) { return getTargetNodeAt(x, y, z); }
@@ -63,7 +82,7 @@ public final class HoverAirshipPlanner implements VehicleRoutePlanner {
             BlockPos pos = new BlockPos(node.x, node.y, node.z);
             for (Direction direction : Direction.values()) {
                 BlockPos next = pos.relative(direction);
-                if (clear(next) && VehicleRoutePlanner.clearSegment(level, Vec3.atCenterOf(pos), Vec3.atCenterOf(next), envelope)) {
+                if (clear(next) && clearAirshipSegment(level, Vec3.atCenterOf(pos), Vec3.atCenterOf(next), envelope)) {
                     Node value = getNode(next); value.type = PathType.OPEN;
                     if (!value.closed) output[count++] = value;
                 }
@@ -72,5 +91,13 @@ public final class HoverAirshipPlanner implements VehicleRoutePlanner {
         }
         @Override public PathType getPathTypeOfMob(PathfindingContext context, int x, int y, int z, Mob mob) { return getPathType(context, x, y, z); }
         @Override public PathType getPathType(PathfindingContext context, int x, int y, int z) { return clear(new BlockPos(x, y, z)) ? PathType.OPEN : PathType.BLOCKED; }
+    }
+
+    private static boolean clearAirshipSegment(ServerLevel level, Vec3 from, Vec3 to, Envelope envelope) {
+        int steps = Math.max(1, (int) Math.ceil(from.distanceTo(to) * 2));
+        if (steps > 2048) return false;
+        for (int i = 0; i <= steps; i++)
+            if (!clearAirship(level, from.lerp(to, (double) i / steps), envelope)) return false;
+        return true;
     }
 }

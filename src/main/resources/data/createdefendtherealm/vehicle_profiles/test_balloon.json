@@ -1,0 +1,28 @@
+{
+  "id": "test_balloon",
+  "template": "Test Ballon",
+  "vehicle_family": "hover_airship",
+  "navigation_profile": "hover_airship",
+  "weapons": [
+    {
+      "id": "main_turret",
+      "behavior": "independent_turret",
+      "range": {
+        "minimum": 8.0,
+        "preferred_minimum": 28.0,
+        "preferred_maximum": 40.0,
+        "maximum": 96.0,
+        "maximum_firing_speed": 1.5
+      },
+      "trajectory": {
+        "type": "direct_low_arc",
+        "projectile_speed": 4.0,
+        "gravity_per_tick": 0.025,
+        "drag_per_tick": 0.01,
+        "maximum_flight_ticks": 80
+      },
+      "breach_capable": true,
+      "breach_shot_limit": 3
+    }
+  ]
+}

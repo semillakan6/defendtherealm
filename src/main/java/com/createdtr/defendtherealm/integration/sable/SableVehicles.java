@@ -55,4 +55,18 @@ public final class SableVehicles {
         }
         return new Cleanup(removed, encounter.owned().size());
     }
+
+    /** Acknowledge only UUIDs absent from both the live container and Sable's persisted ticket index. */
+    public static int acknowledgeAuthoritativelyAbsent(ServerLevel level, Encounter encounter) {
+        var value = SubLevelContainer.getContainer(level);
+        if (!(value instanceof dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer container)) return 0;
+        int acknowledged = 0;
+        for (UUID id : encounter.owned()) {
+            if (container.getSubLevel(id) == null && !container.getAllTickets().containsKey(id)) {
+                encounter.acknowledgeRemoval(id);
+                acknowledged++;
+            }
+        }
+        return acknowledged;
+    }
 }

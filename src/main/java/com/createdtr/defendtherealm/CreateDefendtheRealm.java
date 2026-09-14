@@ -4,16 +4,11 @@ import org.slf4j.Logger;
 
 import com.mojang.logging.LogUtils;
 
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.food.FoodProperties;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.CreativeModeTab;
 import net.minecraft.world.item.CreativeModeTabs;
-import net.minecraft.world.item.Item;
-import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.material.MapColor;
 import net.neoforged.api.distmarker.Dist;
@@ -45,26 +40,25 @@ public class CreateDefendtheRealm {
     public static final DeferredBlock<com.createdtr.defendtherealm.hq.DevHqBlock> DEV_HQ = BLOCKS.register("dev_hq",
             () -> new com.createdtr.defendtherealm.hq.DevHqBlock(BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_RED).strength(0.5F, 0.5F)));
     public static final DeferredItem<BlockItem> DEV_HQ_ITEM = ITEMS.registerSimpleBlockItem("dev_hq", DEV_HQ);
+    public static final DeferredBlock<com.createdtr.defendtherealm.hq.DevTargetBlock> DEV_DEFENSE = BLOCKS.register("dev_defense_target",
+            () -> new com.createdtr.defendtherealm.hq.DevTargetBlock(com.createdtr.defendtherealm.hq.DevTargetSavedData.Kind.DEFENSE,
+                    BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_ORANGE).strength(1.5F, 3.0F)));
+    public static final DeferredBlock<com.createdtr.defendtherealm.hq.DevTargetBlock> DEV_INFRASTRUCTURE = BLOCKS.register("dev_infrastructure_target",
+            () -> new com.createdtr.defendtherealm.hq.DevTargetBlock(com.createdtr.defendtherealm.hq.DevTargetSavedData.Kind.INFRASTRUCTURE,
+                    BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_YELLOW).strength(1.0F, 2.0F)));
+    public static final DeferredItem<BlockItem> DEV_DEFENSE_ITEM = ITEMS.registerSimpleBlockItem("dev_defense_target", DEV_DEFENSE);
+    public static final DeferredItem<BlockItem> DEV_INFRASTRUCTURE_ITEM = ITEMS.registerSimpleBlockItem("dev_infrastructure_target", DEV_INFRASTRUCTURE);
     // Create a Deferred Register to hold CreativeModeTabs which will all be registered under the "createdefendtherealm" namespace
     public static final DeferredRegister<CreativeModeTab> CREATIVE_MODE_TABS = DeferredRegister.create(Registries.CREATIVE_MODE_TAB, MODID);
 
-    // Creates a new Block with the id "createdefendtherealm:example_block", combining the namespace and path
-    public static final DeferredBlock<Block> EXAMPLE_BLOCK = BLOCKS.registerSimpleBlock("example_block", BlockBehaviour.Properties.of().mapColor(MapColor.STONE));
-    // Creates a new BlockItem with the id "createdefendtherealm:example_block", combining the namespace and path
-    public static final DeferredItem<BlockItem> EXAMPLE_BLOCK_ITEM = ITEMS.registerSimpleBlockItem("example_block", EXAMPLE_BLOCK);
-
-    // Creates a new food item with the id "createdefendtherealm:example_id", nutrition 1 and saturation 2
-    public static final DeferredItem<Item> EXAMPLE_ITEM = ITEMS.registerSimpleItem("example_item", new Item.Properties().food(new FoodProperties.Builder()
-            .alwaysEdible().nutrition(1).saturationModifier(2f).build()));
-
-    // Creates a creative tab with the id "createdefendtherealm:example_tab" for the example item, that is placed after the combat tab
-    public static final DeferredHolder<CreativeModeTab, CreativeModeTab> EXAMPLE_TAB = CREATIVE_MODE_TABS.register("example_tab", () -> CreativeModeTab.builder()
+    public static final DeferredHolder<CreativeModeTab, CreativeModeTab> DTR_TAB = CREATIVE_MODE_TABS.register("main", () -> CreativeModeTab.builder()
             .title(Component.translatable("itemGroup.createdefendtherealm")) //The language key for the title of your CreativeModeTab
             .withTabsBefore(CreativeModeTabs.COMBAT)
-            .icon(() -> EXAMPLE_ITEM.get().getDefaultInstance())
+            .icon(() -> DEV_HQ_ITEM.get().getDefaultInstance())
             .displayItems((parameters, output) -> {
-                output.accept(EXAMPLE_ITEM.get());// Add the example item to the tab. For your own tabs, this method is preferred over the event
                 output.accept(DEV_HQ_ITEM.get());
+                output.accept(DEV_DEFENSE_ITEM.get());
+                output.accept(DEV_INFRASTRUCTURE_ITEM.get());
             }).build());
 
     // The constructor for the mod class is the first code that is run when your mod is loaded.
@@ -72,6 +66,7 @@ public class CreateDefendtheRealm {
     public CreateDefendtheRealm(IEventBus modEventBus, ModContainer modContainer) {
         // Register the commonSetup method for modloading
         modEventBus.addListener(this::commonSetup);
+        modEventBus.addListener(com.createdtr.defendtherealm.network.DtrNetwork::register);
 
         // Register the Deferred Register to the mod event bus so blocks get registered
         BLOCKS.register(modEventBus);
@@ -93,29 +88,18 @@ public class CreateDefendtheRealm {
     }
 
     private void commonSetup(FMLCommonSetupEvent event) {
-        // Some common setup code
-        LOGGER.info("HELLO FROM COMMON SETUP");
-
-        if (Config.LOG_DIRT_BLOCK.getAsBoolean()) {
-            LOGGER.info("DIRT BLOCK >> {}", BuiltInRegistries.BLOCK.getKey(Blocks.DIRT));
-        }
-
-        LOGGER.info("{}{}", Config.MAGIC_NUMBER_INTRODUCTION.get(), Config.MAGIC_NUMBER.getAsInt());
-
-        Config.ITEM_STRINGS.get().forEach((item) -> LOGGER.info("ITEM >> {}", item));
+        LOGGER.info("Create: Defend the Realm common integration initialized");
     }
 
     // Add the example block item to the building blocks tab
     private void addCreative(BuildCreativeModeTabContentsEvent event) {
-        if (event.getTabKey() == CreativeModeTabs.BUILDING_BLOCKS) {
-            event.accept(EXAMPLE_BLOCK_ITEM);
-        }
+        // The development HQ is intentionally exposed only through the DTR tab.
     }
 
     // You can use SubscribeEvent and let the Event Bus discover methods to call
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
         // Do something when the server starts
-        LOGGER.info("HELLO from server starting");
+        LOGGER.info("Create: Defend the Realm server integration ready");
     }
 }

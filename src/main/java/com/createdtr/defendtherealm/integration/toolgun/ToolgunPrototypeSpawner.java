@@ -2,6 +2,9 @@ package com.createdtr.defendtherealm.integration.toolgun;
 
 import com.createdtr.defendtherealm.encounter.Encounter;
 import com.createdtr.defendtherealm.integration.cbc.CbcAmmunitionSnapshot;
+import com.createdtr.defendtherealm.combat.VehicleCombatProfile;
+import com.createdtr.defendtherealm.combat.VehicleCombatProfiles;
+import com.createdtr.defendtherealm.combat.WeaponRuntime;
 import com.createdtr.defendtherealm.persistence.EncounterSavedData;
 import com.enxv.aeronauticsstructuretool.PlacementSnapMode;
 import com.enxv.aeronauticsstructuretool.blueprint.codec.BlueprintArchiveCodec;
@@ -15,10 +18,18 @@ import com.enxv.aeronauticsstructuretool.blueprint.placement.PlacementTargetMath
 import com.enxv.aeronauticsstructuretool.blueprint.runtime.BlueprintPlacementObserver;
 import com.enxv.aeronauticsstructuretool.blueprint.storage.BlueprintFileRepository;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Path;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.LinkedHashSet;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.api.sublevel.SubLevelObserver;
+import dev.ryanhcode.sable.sublevel.SubLevel;
+import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -49,28 +60,49 @@ public final class ToolgunPrototypeSpawner {
         ServerLevel level = player.serverLevel();
         if (!level.getServer().isSameThread()) throw new IllegalStateException("Prototype spawn requires server thread");
 
+        Path directory = BlueprintFileRepository.serverDirectory(
+                level.getServer().getWorldPath(LevelResource.ROOT), player.getUUID());
+        byte[] archive = BlueprintFileRepository.read(directory, templateName);
+        return spawnArchive(player, templateName, spawn, target, archive);
+    }
+
+    public static Result spawnFixture(ServerPlayer player, BlockPos spawn, BlockPos target) throws IOException {
+        byte[] archive;
+        try (InputStream stream = ToolgunPrototypeSpawner.class.getResourceAsStream(
+                "/data/createdefendtherealm/prototypes/test_balloon.excraft.b64")) {
+            if (stream == null) throw new IOException("Bundled Test Ballon fixture is missing");
+            archive = Base64.getMimeDecoder().decode(stream.readAllBytes());
+        } catch (IllegalArgumentException exception) {
+            throw new IOException("Bundled Test Ballon fixture is corrupt", exception);
+        }
+        return spawnArchive(player, "Test Ballon", spawn, target, archive);
+    }
+
+    private static Result spawnArchive(ServerPlayer player, String templateName, BlockPos spawn, BlockPos target,
+            byte[] archive) throws IOException {
+        ServerLevel level = player.serverLevel();
+        if (!level.getServer().isSameThread()) throw new IllegalStateException("Prototype spawn requires server thread");
+
         EncounterSavedData data = EncounterSavedData.get(level.getServer());
         Encounter previous = data.encounter();
         if (previous != null && previous.state() != Encounter.State.COMPLETED) {
             throw new IllegalArgumentException("An encounter is already active; inspect or cancel it first");
         }
 
-        Path directory = BlueprintFileRepository.serverDirectory(
-                level.getServer().getWorldPath(LevelResource.ROOT), player.getUUID());
-        byte[] archive = BlueprintFileRepository.read(directory, templateName);
         NativeBlueprintDocument document = NativeBlueprintReader.read(
                 BlueprintArchiveCodec.decodeCompressedOrRaw(archive));
+        VehicleCombatProfile combatProfile = VehicleCombatProfiles.requireForTemplate(templateName);
         int spawnRotation = BlueprintFacing.rotationDegrees(document.rootOrientation(),
                 net.minecraft.world.phys.Vec3.atCenterOf(spawn), net.minecraft.world.phys.Vec3.atCenterOf(target));
         ValidatedBlueprint validated = validate(level, document, spawn, spawnRotation);
 
         Encounter encounter = new Encounter(UUID.randomUUID(), validated.weights());
-        CompoundTag context = context(player, templateName, level, spawn, target);
+        CompoundTag context = context(player, templateName, level, spawn, target, combatProfile);
         context.putInt("spawnRotationDegrees", spawnRotation);
         if (!level.hasChunkAt(target) || !level.getBlockState(target).is(com.createdtr.defendtherealm.CreateDefendtheRealm.DEV_HQ.get()))
             throw new IOException("Target must be a loaded development HQ");
         var route = com.createdtr.defendtherealm.encounter.AssaultController.initialRoute(level, encounter.id(),
-                net.minecraft.world.phys.Vec3.atCenterOf(spawn), target, validated.envelope());
+                net.minecraft.world.phys.Vec3.atCenterOf(spawn), target, validated.envelope(), combatProfile.primaryWeapon().range());
         if (route.isEmpty()) throw new IOException("No loaded, clear air route to the HQ; placement was not attempted");
         // This route proves feasibility before placement. The live route begins at
         // Sable's actual logical pose, whose anchor need not equal the requested block.
@@ -83,6 +115,15 @@ public final class ToolgunPrototypeSpawner {
         data.begin(encounter, context);
         encounter.advance(Encounter.State.SPAWNING);
         data.setDirty();
+
+        var allocated = new LinkedHashSet<UUID>();
+        var tracking = new AtomicBoolean(true);
+        var sableContainer = SubLevelContainer.getContainer(level);
+        if (sableContainer != null) sableContainer.addObserver(new SubLevelObserver() {
+            @Override public void onSubLevelAdded(SubLevel subLevel) {
+                if (tracking.get()) allocated.add(subLevel.getUniqueId());
+            }
+        });
 
         BlueprintPlacementObserver observer = new BlueprintPlacementObserver() {
             @Override
@@ -109,25 +150,39 @@ public final class ToolgunPrototypeSpawner {
             if (result.rootSubLevel() == null) throw new IOException("Toolgun did not return a root vehicle");
 
             UUID vehicleId = result.rootSubLevel().getUniqueId();
-            encounter.own(vehicleId);
+            allocated.add(vehicleId);
+            for (UUID id : allocated) encounter.own(id);
             CompoundTag currentVehicleData = result.rootSubLevel().getUserDataTag();
             CompoundTag vehicleData = currentVehicleData == null ? new CompoundTag() : currentVehicleData.copy();
             vehicleData.putUUID("createdefendtherealmEncounter", encounter.id());
             vehicleData.putString("createdefendtherealmTemplate", BlueprintFileRepository.normalizeName(templateName));
             result.rootSubLevel().setUserDataTag(vehicleData);
+            if (sableContainer != null) for (UUID id : allocated) {
+                if (sableContainer.getSubLevel(id) instanceof ServerSubLevel placed) {
+                    CompoundTag placedData = placed.getUserDataTag() == null
+                            ? new CompoundTag() : placed.getUserDataTag().copy();
+                    placedData.putUUID("createdefendtherealmEncounter", encounter.id());
+                    placed.setUserDataTag(placedData);
+                }
+            }
             context.putUUID("rootVehicle", vehicleId);
             context.putInt("placedSublevels", result.placedSubLevelCount());
             context.putDouble("placedMass", result.placedTotalMass());
             data.updateContext(context);
+            com.createdtr.defendtherealm.integration.sable.EncounterIntegrity.initializeRoot(data, result.rootSubLevel());
 
             if (result.runtimeRestoredImmediately() && encounter.state() == Encounter.State.SPAWNING) {
                 encounter.advance(Encounter.State.APPROACHING);
                 data.setDirty();
             }
+            tracking.set(false);
             return new Result(encounter.id(), vehicleId, validated.weights().size(), validated.ammunition(),
                     encounter.state() == Encounter.State.APPROACHING);
         } catch (IOException | RuntimeException ex) {
+            tracking.set(false);
+            for (UUID id : allocated) encounter.own(id);
             encounter.terminate(Encounter.Reason.INVALID_PLACEMENT);
+            if (!allocated.isEmpty()) com.createdtr.defendtherealm.integration.sable.SableVehicles.removeOwned(level, encounter);
             if (encounter.owned().isEmpty()) encounter.advance(Encounter.State.COMPLETED);
             context.putString("placementFailure", safeMessage(ex));
             data.updateContext(context);
@@ -225,12 +280,15 @@ public final class ToolgunPrototypeSpawner {
     }
 
     private static CompoundTag context(ServerPlayer player, String templateName, ServerLevel level,
-                                       BlockPos spawn, BlockPos target) {
+                                       BlockPos spawn, BlockPos target, VehicleCombatProfile combatProfile) {
         CompoundTag context = new CompoundTag();
         context.putBoolean("hqAssault", true);
-        context.putString("navigationProfile", "hover_airship");
+        WeaponRuntime.initialize(context, combatProfile);
         context.putUUID("owner", player.getUUID());
         context.putString("template", BlueprintFileRepository.normalizeName(templateName));
+        // The inspected Milestone 01 Test Balloon carries finite CBC AP rounds.
+        // Other developer templates fail closed until their weapon profile is explicit.
+        context.putBoolean("breachCapable", combatProfile.primaryWeapon().breachCapable());
         context.putString("dimension", level.dimension().location().toString());
         putPos(context, "spawn", spawn);
         putPos(context, "target", target);
