@@ -25,6 +25,7 @@ import rbasamoyai.createbigcannons.cannon_control.contraption.MountedAutocannonC
 /** Compiled CBC integration; setters are rate limited and firing remains in CBC's tick. */
 public final class PrototypeWeapon {
     public enum Readiness { READY, MISSING_MOUNT, RESTORING, UNSUPPORTED }
+    public record BarrelPose(Vec3 transformedOrigin, Vec3 barrelEnd, Vec3 projectileSpawn, Vec3 direction) {}
     private PrototypeWeapon() {}
     public static List<CannonMountBlockEntity> findAll(ServerSubLevel ship) {
         var result = new java.util.ArrayList<CannonMountBlockEntity>();
@@ -65,10 +66,33 @@ public final class PrototypeWeapon {
         var entity = mount.getContraption();
         if (entity == null || !(entity.getContraption() instanceof MountedAutocannonContraption cannon))
             throw new IllegalStateException("Missing mounted autocannon");
+        return barrelPose(ship, entity, cannon, 0).projectileSpawn();
+    }
+    public static BarrelPose barrelPose(
+            ServerSubLevel ship,
+            rbasamoyai.createbigcannons.cannon_control.contraption.PitchOrientedContraptionEntity entity,
+            MountedAutocannonContraption cannon, float partialTicks) {
         Direction direction = cannon.initialOrientation();
         BlockPos end = cannon.getStartPos();
         for (int i = 0; i < 128 && cannon.getBlocks().containsKey(end.relative(direction)); i++) end = end.relative(direction);
-        return ship.logicalPose().transformPosition(entity.toGlobalVector(Vec3.atCenterOf(end).add(Vec3.atLowerCornerOf(direction.getNormal()).scale(0.6)), 1));
+        Vec3 origin = entity.toGlobalVector(Vec3.atCenterOf(BlockPos.ZERO), partialTicks);
+        Vec3 barrelEnd = entity.toGlobalVector(Vec3.atCenterOf(end.relative(direction)), partialTicks);
+        Vec3 vector = barrelEnd.subtract(origin);
+        if (vector.lengthSqr() < 1.0e-9) throw new IllegalStateException("CBC returned a zero-length barrel transform");
+        Vec3 localDirection = vector.normalize();
+        // CBC constructs the projectile 1.5 blocks behind the post-barrel point,
+        // then advances it one block along the barrel before the join event.
+        // The entity position observed by NeoForge is therefore 0.5 blocks
+        // behind that point and is the authoritative projectile origin.
+        Vec3 localSpawn = barrelEnd.subtract(localDirection.scale(0.5));
+        // CBC fires inside Sable's embedded level. Its contraption transform is
+        // therefore in plot coordinates; targeting and diagnostics operate in
+        // the parent world and must apply the ship pose exactly once.
+        return new BarrelPose(
+                ship.logicalPose().transformPosition(origin),
+                ship.logicalPose().transformPosition(barrelEnd),
+                ship.logicalPose().transformPosition(localSpawn),
+                ship.logicalPose().transformNormal(localDirection).normalize());
     }
     public static void tick(ServerSubLevel ship, BlockPos target, CompoundTag context, boolean engage) {
         tick(ship, Vec3.atCenterOf(target), target, context, engage);
@@ -97,7 +121,8 @@ public final class PrototypeWeapon {
         context.putUUID("cannonEntity", entity.getUUID());
         context.putString("activeWeapon", weaponId);
         context.putBoolean("mountRunning", mount.isRunning());
-        Vec3 muzzle = muzzle(ship, mount);
+        BarrelPose initialPose = barrelPose(ship, entity, cannon, 0);
+        Vec3 muzzle = initialPose.projectileSpawn();
         double projectileSpeed = context.contains("observedProjectileSpeed")
                 ? Math.max(0.1, context.getDouble("observedProjectileSpeed")) : configuredTrajectory.projectileSpeed();
         var trajectory = new TrajectoryProfile(configuredTrajectory.type(), projectileSpeed,
@@ -120,37 +145,68 @@ public final class PrototypeWeapon {
         Vec3 current = entity.applyRotation(Vec3.atLowerCornerOf(cannon.initialOrientation().getNormal()), 1).normalize();
         double yawError = Mth.wrapDegrees(Math.toDegrees(Math.atan2(-local.x, local.z) - Math.atan2(-current.x, current.z)));
         double pitchError = Math.toDegrees(Math.asin(Mth.clamp(local.y, -1, 1)) - Math.asin(Mth.clamp(current.y, -1, 1)));
+        // Stabilize the previous world-space barrel direction against hull motion
+        // before applying the turret's own bounded target-tracking slew.
+        double yawCompensation = 0;
+        double pitchCompensation = 0;
+        if (context.contains("actualBarrelX")) {
+            Vec3 previousWorld = new Vec3(context.getDouble("actualBarrelX"),
+                    context.getDouble("actualBarrelY"), context.getDouble("actualBarrelZ"));
+            Vec3 stabilized = ship.logicalPose().transformNormalInverse(previousWorld).normalize();
+            yawCompensation = Mth.wrapDegrees(Math.toDegrees(Math.atan2(-stabilized.x, stabilized.z)
+                    - Math.atan2(-current.x, current.z)));
+            pitchCompensation = Math.toDegrees(Math.asin(Mth.clamp(stabilized.y, -1, 1))
+                    - Math.asin(Mth.clamp(current.y, -1, 1)));
+        }
         Direction initial = cannon.initialOrientation();
         float sign = (initial.getAxisDirection() == Direction.AxisDirection.POSITIVE) == (initial.getAxis() == Direction.Axis.X) ? 1 : -1;
-        float nextYaw = entity.yaw + (float) Mth.clamp(yawError, -0.75, 0.75);
-        float nextPitch = Mth.clamp(entity.pitch + (float) Mth.clamp(pitchError, -0.75, 0.75),
+        float oldYaw = entity.yaw;
+        float oldPitch = entity.pitch;
+        float nextYaw = entity.yaw + (float) com.createdtr.defendtherealm.combat.TurretStabilization.step(
+                yawCompensation, Mth.wrapDegrees(yawError - yawCompensation));
+        float nextPitch = Mth.clamp(entity.pitch + (float) com.createdtr.defendtherealm.combat.TurretStabilization.step(
+                pitchCompensation, pitchError - pitchCompensation),
                 -entity.maximumDepression(), entity.maximumElevation());
         mount.setYaw(nextYaw);
         mount.setPitch(nextPitch * sign);
-        // CBC's mount tick normally copies these fields. Sable's nested runtime
-        // restoration does not tick that copy reliably, so synchronize the public
-        // contraption controls through the same bounded values.
+        // Sable does not reliably tick CBC's nested mount bridge. Invoke CBC's
+        // own mount-to-contraption rotation path immediately. Restored mounts
+        // can reject their controller identity, so preserve the verified Sable
+        // fallback by assigning the nested controls to the same bounded pose.
+        ((com.createdtr.defendtherealm.mixin.CannonMountRotationInvoker) mount).dtr$applyRotation();
         entity.yaw = nextYaw;
         entity.pitch = nextPitch;
         mount.setChanged();
-        // Fire from the direction that clients render after this tick's bounded
-        // slew, never from the stale pre-update barrel vector.
-        Vec3 actualLocal = entity.applyRotation(Vec3.atLowerCornerOf(cannon.initialOrientation().getNormal()), 1).normalize();
-        org.joml.Vector3d transformedActual = ship.logicalPose().transformNormal(new org.joml.Vector3d(
-                actualLocal.x, actualLocal.y, actualLocal.z));
-        Vec3 actualWorld = new Vec3(transformedActual.x, transformedActual.y, transformedActual.z).normalize();
-        double error = Math.toDegrees(Math.acos(Mth.clamp(actualLocal.dot(local), -1, 1)));
+        if (Math.abs(nextYaw - oldYaw) > 1.0e-4F || Math.abs(nextPitch - oldPitch) > 1.0e-4F) {
+            mount.sendData();
+            context.putLong("lastMountSyncTick", ship.getLevel().getGameTime());
+        }
+        // CBC fires from partial tick zero. Require its firing pose and its
+        // current render pose to agree with the recomputed solution.
+        BarrelPose firingPose = barrelPose(ship, entity, cannon, 0);
+        BarrelPose renderPose = barrelPose(ship, entity, cannon, 1);
+        solution = BallisticFireControl.solve(firingPose.projectileSpawn(), target, targetVelocity, trajectory);
+        if (!solution.reachable()) return;
+        Vec3 desiredWorld = solution.launchDirection();
+        double firingError = angleDegrees(firingPose.direction(), desiredWorld);
+        double renderError = angleDegrees(renderPose.direction(), desiredWorld);
+        double error = Math.max(firingError, renderError);
         context.putDouble("aimError", error);
+        context.putDouble("firingAimError", firingError);
+        context.putDouble("renderAimError", renderError);
         long now = ship.getLevel().getGameTime();
-        context.putDouble("muzzleX", muzzle.x);
-        context.putDouble("muzzleY", muzzle.y);
-        context.putDouble("muzzleZ", muzzle.z);
+        context.putDouble("muzzleX", firingPose.projectileSpawn().x);
+        context.putDouble("muzzleY", firingPose.projectileSpawn().y);
+        context.putDouble("muzzleZ", firingPose.projectileSpawn().z);
         context.putDouble("desiredBarrelX", solution.launchDirection().x);
         context.putDouble("desiredBarrelY", solution.launchDirection().y);
         context.putDouble("desiredBarrelZ", solution.launchDirection().z);
-        context.putDouble("actualBarrelX", actualWorld.x);
-        context.putDouble("actualBarrelY", actualWorld.y);
-        context.putDouble("actualBarrelZ", actualWorld.z);
+        context.putDouble("actualBarrelX", renderPose.direction().x);
+        context.putDouble("actualBarrelY", renderPose.direction().y);
+        context.putDouble("actualBarrelZ", renderPose.direction().z);
+        context.putDouble("firingBarrelX", firingPose.direction().x);
+        context.putDouble("firingBarrelY", firingPose.direction().y);
+        context.putDouble("firingBarrelZ", firingPose.direction().z);
         context.putDouble("predictedImpactX", solution.predictedImpact().x);
         context.putDouble("predictedImpactY", solution.predictedImpact().y);
         context.putDouble("predictedImpactZ", solution.predictedImpact().z);
@@ -172,6 +228,13 @@ public final class PrototypeWeapon {
             if (acceptedHit != null) context.putLong("permittedTargetBlock", acceptedHit.asLong());
             else context.remove("permittedTargetBlock");
             context.putInt("fireRequests", context.getInt("fireRequests") + 1);
+            context.putLong("expectedProjectileTick", now);
+            context.putDouble("expectedProjectileSpawnX", firingPose.projectileSpawn().x);
+            context.putDouble("expectedProjectileSpawnY", firingPose.projectileSpawn().y);
+            context.putDouble("expectedProjectileSpawnZ", firingPose.projectileSpawn().z);
+            context.putDouble("expectedProjectileDirectionX", firingPose.direction().x);
+            context.putDouble("expectedProjectileDirectionY", firingPose.direction().y);
+            context.putDouble("expectedProjectileDirectionZ", firingPose.direction().z);
             // Sable restores the nested CBC contraption but does not reliably
             // tick its vanilla mount redstone bridge. Invoke CBC's public shot
             // operation directly; CBC still performs its real ammunition,
@@ -184,6 +247,10 @@ public final class PrototypeWeapon {
             CompoundTag accounted = data.context();
             context.putInt("shots", accounted.getInt("shots"));
             context.putInt("replenishments", accounted.getInt("replenishments"));
+            context.putInt("spentItemChecks", accounted.getInt("spentItemChecks"));
+            context.putInt("suppressedCasings", accounted.getInt("suppressedCasings"));
+            if (accounted.contains("lastSuppressedCasing"))
+                context.putString("lastSuppressedCasing", accounted.getString("lastSuppressedCasing"));
             context.putLong("permittedShotTick", accounted.getLong("permittedShotTick"));
             if (accounted.contains("replenishmentFailure"))
                 context.putString("replenishmentFailure", accounted.getString("replenishmentFailure"));
@@ -192,9 +259,17 @@ public final class PrototypeWeapon {
             context.putLong("observedAmmunitionDelta", accounted.getLong("observedAmmunitionDelta"));
             for (String key : List.of("observedProjectileSpeed", "observedProjectileVelocityX",
                     "observedProjectileVelocityY", "observedProjectileVelocityZ", "observedProjectileSpawnX",
-                    "observedProjectileSpawnY", "observedProjectileSpawnZ"))
+                    "observedProjectileSpawnY", "observedProjectileSpawnZ", "projectileSpawnError",
+                    "projectileDirectionError"))
                 if (accounted.contains(key)) context.putDouble(key, accounted.getDouble(key));
+            for (String key : List.of("observedProjectileTick", "projectilePoseTickDelta"))
+                if (accounted.contains(key)) context.putLong(key, accounted.getLong(key));
+            if (accounted.contains("projectilePoseSameTick"))
+                context.putBoolean("projectilePoseSameTick", accounted.getBoolean("projectilePoseSameTick"));
         }
+    }
+    private static double angleDegrees(Vec3 first, Vec3 second) {
+        return Math.toDegrees(Math.acos(Mth.clamp(first.normalize().dot(second.normalize()), -1, 1)));
     }
     public static boolean assessClearShot(ServerSubLevel ship, Vec3 target, BlockPos acceptedHit, CompoundTag context) {
         return assessClearShot(ship, find(ship), target, acceptedHit, context);

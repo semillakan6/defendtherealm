@@ -2,19 +2,15 @@ package com.createdtr.defendtherealm.encounter;
 
 import com.createdtr.defendtherealm.CreateDefendtheRealm;
 import com.createdtr.defendtherealm.combat.WeaponRangeProfile;
+import com.createdtr.defendtherealm.hq.DevTargetSavedData;
 import dev.ryanhcode.sable.Sable;
 import dev.ryanhcode.sable.sublevel.SubLevel;
-import com.createdtr.defendtherealm.hq.DevTargetSavedData;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.StringTag;
-import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
@@ -25,6 +21,15 @@ public final class AssaultTargeting {
     public record Target(Type type, String key, Vec3 aim, Vec3 velocity, BlockPos block) {}
     private AssaultTargeting() {}
 
+    static int priority(Type type) {
+        return switch (type) {
+            case HQ -> 0;
+            case PLAYER -> 1;
+            case DEFENSE -> 2;
+            case INFRASTRUCTURE -> 3;
+        };
+    }
+
     public static Target resolveOrSelect(ServerLevel level, Vec3 ship, BlockPos hq, CompoundTag context) {
         return resolveOrSelect(level, ship, ship, hq, context,
                 new WeaponRangeProfile(0, 0, 48, 48, 0.35), false);
@@ -32,38 +37,28 @@ public final class AssaultTargeting {
 
     public static Target resolveOrSelect(ServerLevel level, Vec3 ship, Vec3 muzzle, BlockPos hq,
             CompoundTag context, WeaponRangeProfile range, boolean hqEngageable) {
+        return resolveOrSelect(level, ship, muzzle, hq, context, range, hqEngageable, target -> true);
+    }
+
+    public static Target resolveOrSelect(ServerLevel level, Vec3 ship, Vec3 muzzle, BlockPos hq,
+            CompoundTag context, WeaponRangeProfile range, boolean hqEngageable, Predicate<Target> feasible) {
         Target current = resolve(level, hq, context);
-        if (current != null && !range.contains(muzzle.distanceTo(current.aim()))) current = null;
+        if (current != null && (!range.contains(muzzle.distanceTo(current.aim()))
+                || current.type() != Type.HQ && !feasible.test(current))) current = null;
         long now = level.getGameTime();
-        if (current != null && now < context.getLong("nextTargetReview")) return current;
+        if (current != null && now < context.getLong("nextTargetReview")
+                && !(hqEngageable && current.type() != Type.HQ)) return current;
         context.putLong("nextTargetReview", now + 10);
-        Target selected = select(level, ship, muzzle, hq, context, range, hqEngageable);
+        Target selected = select(level, muzzle, hq, range, hqEngageable, feasible);
         if (selected != null && (current == null || !current.key().equals(selected.key()))) {
             write(context, selected);
             context.putString("tacticalPhase", "APPROACH");
-            context.putInt("orbitAttempts", 0);
-            context.putInt("breachShots", 0);
-            context.putInt("opportunityShots", 0);
-            context.remove("maneuverRoute");
-            context.remove("maneuverCursor");
-            context.remove("maneuverDestination");
-            context.remove("maneuverProgressDistance");
-            context.remove("maneuverLastProgress");
-            context.remove("orbitSearchStartedTick");
-            context.remove("maneuverHoldX");
-            context.remove("maneuverHoldY");
-            context.remove("maneuverHoldZ");
+            context.putLong("targetSelectedTick", now);
         }
         return selected;
     }
 
     public static void rejectCurrent(CompoundTag context) {
-        String key = context.getString("combatTargetKey");
-        if (!key.isEmpty()) {
-            ListTag list = context.getList("rejectedTargets", Tag.TAG_STRING);
-            if (list.stream().noneMatch(tag -> tag.getAsString().equals(key))) list.add(StringTag.valueOf(key));
-            context.put("rejectedTargets", list);
-        }
         context.remove("combatTargetType");
         context.remove("combatTargetKey");
         context.remove("combatTargetPos");
@@ -71,37 +66,38 @@ public final class AssaultTargeting {
         context.putString("tacticalPhase", "APPROACH");
     }
 
-    private static Target select(ServerLevel level, Vec3 ship, Vec3 muzzle, BlockPos hq, CompoundTag context,
-            WeaponRangeProfile range, boolean hqEngageable) {
-        Set<String> rejected = rejected(context);
+    private static Target select(ServerLevel level, Vec3 muzzle, BlockPos hq,
+            WeaponRangeProfile range, boolean hqEngageable, Predicate<Target> feasible) {
         String hqKey = "hq:" + hq.asLong();
-        // The HQ remains the vehicle's strategic destination, but an independent
-        // weapon should take an eligible player opportunity along that route.
-        // Selecting the HQ first here made a long-range turret ignore a player
-        // as soon as both targets entered the same range envelope.
+        // The HQ has top weapon priority whenever it is currently engageable.
+        // An independent turret may take a player opportunity while the HQ is
+        // outside range or blocked, without replacing the strategic HQ route.
+        if (hqEngageable)
+            return new Target(Type.HQ, hqKey, Vec3.atCenterOf(hq), Vec3.ZERO, hq);
         Optional<ServerPlayer> player = level.players().stream()
                 .filter(p -> !p.isCreative() && !p.isSpectator() && p.isAlive())
-                .filter(p -> qualifies(worldPosition(p), ship, Vec3.atCenterOf(hq)))
                 .filter(p -> range.contains(worldPosition(p).distanceTo(muzzle)))
-                .filter(p -> !rejected.contains("player:" + p.getUUID()))
+                .filter(p -> feasible.test(player(p)))
                 .min(Comparator.comparingDouble(p -> worldPosition(p).distanceToSqr(muzzle)));
         if (player.isPresent()) return player(player.get());
-        if (hqEngageable && !rejected.contains(hqKey))
-            return new Target(Type.HQ, hqKey, Vec3.atCenterOf(hq), Vec3.ZERO, hq);
-        if (!rejected.contains(hqKey)) return new Target(Type.HQ, hqKey, Vec3.atCenterOf(hq), Vec3.ZERO, hq);
-        for (BlockPos pos : DevTargetSavedData.get(level).loaded(level, DevTargetSavedData.Kind.DEFENSE, hq).stream()
-                .sorted(Comparator.comparingDouble(p -> p.distToCenterSqr(ship))).toList()) {
-            String key = "defense:" + pos.asLong();
-            if (!rejected.contains(key) && range.contains(Vec3.atCenterOf(pos).distanceTo(muzzle)))
-                return new Target(Type.DEFENSE, key, Vec3.atCenterOf(pos), Vec3.ZERO, pos);
-        }
-        for (BlockPos pos : DevTargetSavedData.get(level).loaded(level, DevTargetSavedData.Kind.INFRASTRUCTURE, hq).stream()
-                .sorted(Comparator.comparingDouble(p -> p.distToCenterSqr(ship))).toList()) {
-            String key = "infrastructure:" + pos.asLong();
-            if (!rejected.contains(key) && range.contains(Vec3.atCenterOf(pos).distanceTo(muzzle)))
-                return new Target(Type.INFRASTRUCTURE, key, Vec3.atCenterOf(pos), Vec3.ZERO, pos);
-        }
-        return null;
+        Target defense = nearestMarker(level, muzzle, hq, DevTargetSavedData.Kind.DEFENSE,
+                Type.DEFENSE, range, feasible);
+        if (defense != null) return defense;
+        Target infrastructure = nearestMarker(level, muzzle, hq, DevTargetSavedData.Kind.INFRASTRUCTURE,
+                Type.INFRASTRUCTURE, range, feasible);
+        if (infrastructure != null) return infrastructure;
+        return new Target(Type.HQ, hqKey, Vec3.atCenterOf(hq), Vec3.ZERO, hq);
+    }
+
+    private static Target nearestMarker(ServerLevel level, Vec3 muzzle, BlockPos hq,
+            DevTargetSavedData.Kind kind, Type type, WeaponRangeProfile range, Predicate<Target> feasible) {
+        return DevTargetSavedData.get(level).loaded(level, kind, hq).stream()
+                .map(pos -> new Target(type, type.name().toLowerCase() + ":" + pos.asLong(),
+                        Vec3.atCenterOf(pos), Vec3.ZERO, pos))
+                .filter(target -> range.contains(muzzle.distanceTo(target.aim())))
+                .filter(feasible)
+                .min(Comparator.comparingDouble(target -> target.aim().distanceToSqr(muzzle)))
+                .orElse(null);
     }
 
     private static Target resolve(ServerLevel level, BlockPos hq, CompoundTag context) {
@@ -147,17 +143,5 @@ public final class AssaultTargeting {
         context.putString("combatTargetKey", target.key());
         if (target.type() == Type.PLAYER) context.putUUID("combatTargetPlayer", UUID.fromString(target.key().substring(7)));
         else context.putLong("combatTargetPos", target.block().asLong());
-    }
-    private static Set<String> rejected(CompoundTag context) {
-        Set<String> result = new HashSet<>();
-        for (Tag tag : context.getList("rejectedTargets", Tag.TAG_STRING)) result.add(tag.getAsString());
-        return result;
-    }
-    static boolean qualifies(Vec3 player, Vec3 ship, Vec3 hq) {
-        if (player.distanceToSqr(hq) <= 128D * 128D) return true;
-        Vec3 segment = hq.subtract(ship);
-        double length = segment.lengthSqr();
-        double t = length == 0 ? 0 : Math.clamp(player.subtract(ship).dot(segment) / length, 0, 1);
-        return player.distanceToSqr(ship.add(segment.scale(t))) <= 48D * 48D;
     }
 }

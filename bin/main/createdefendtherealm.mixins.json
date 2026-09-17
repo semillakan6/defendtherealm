@@ -2,7 +2,7 @@
   "required": true,
   "package": "com.createdtr.defendtherealm.mixin",
   "compatibilityLevel": "JAVA_21",
-  "mixins": ["AutocannonShotMixin", "AutocannonInputMixin", "CannonMountRotationInvoker", "ProjectileOutcomeMixin", "GameTestOriginMixin", "SableBlockChangeMixin", "SableSplitMixin"],
+  "mixins": ["AutocannonShotMixin", "AutocannonInputMixin", "ProjectileOutcomeMixin", "GameTestOriginMixin", "SableBlockChangeMixin", "SableSplitMixin"],
   "injectors": {
     "defaultRequire": 1
   },

@@ -70,7 +70,12 @@ public final class AssaultController {
         ServerLevel level = null;
         for (var candidate : event.getServer().getAllLevels())
             if (candidate.dimension().location().toString().equals(context.getString("dimension"))) level = candidate;
-        if (level == null) { encounter.terminate(Encounter.Reason.RECOVERY_FAILED); data.setDirty(); return; }
+        if (level == null) {
+            context.putString("controllerFailure", "Encounter dimension is temporarily unavailable");
+            context.putBoolean("controllerSuspended", true);
+            data.updateContext(context);
+            return;
+        }
         try {
             if (encounter.state() == Encounter.State.DESTROYING) {
                 tickDestroying(level, data, encounter, context);
@@ -98,18 +103,28 @@ public final class AssaultController {
             if (encounter.state() == Encounter.State.SPAWNING) return;
             long now = level.getGameTime();
             BlockPos target = position(context.getCompound("target"));
-            boolean targetPresent = level.hasChunkAt(target)
+            boolean targetLoaded = level.hasChunkAt(target);
+            boolean targetPresent = targetLoaded
                     && level.getBlockState(target).is(CreateDefendtheRealm.DEV_HQ.get());
-            boolean destructionConfirmed = context.getBoolean("targetDestroyedByProjectile");
-            if (!targetPresent && !destructionConfirmed) {
-                encounter.terminate(Encounter.Reason.LOST_TARGET); DRIVES.remove(level); data.setDirty(); return;
+            if (targetPresent) context.putBoolean("targetObserved", true);
+            if (targetLoaded && !targetPresent && context.getBoolean("targetObserved")
+                    && !context.getBoolean("targetDestroyed")) {
+                context.putBoolean("targetDestroyed", true);
+                context.putLong("targetDestroyedTick", now);
+                context.putInt("postImpactTicksRemaining", com.createdtr.defendtherealm.Config.POST_IMPACT_LINGER.get());
+            }
+            boolean destructionConfirmed = context.getBoolean("targetDestroyed");
+            if (!targetLoaded) {
+                context.putString("controllerStatus", "HQ chunk temporarily unavailable");
+                data.updateContext(context);
+                return;
             }
             var container = SubLevelContainer.getContainer(level);
             var candidate = container == null || !context.hasUUID("rootVehicle") ? null : container.getSubLevel(context.getUUID("rootVehicle"));
             if (!(candidate instanceof ServerSubLevel ship) || ship.isRemoved()) {
                 DRIVES.remove(level);
                 int missing = context.getInt("missingTicks") + 1; context.putInt("missingTicks", missing);
-                if (missing > 200) encounter.terminate(Encounter.Reason.RECOVERY_FAILED);
+                if (missing > 200) encounter.terminate(Encounter.Reason.DEFEATED);
                 data.updateContext(context); return;
             }
             context.putInt("missingTicks", 0);
@@ -127,7 +142,7 @@ public final class AssaultController {
                     EncounterChunkTickets.update(level, data, ship, BlockPos.containing(current), BlockPos.containing(current), target);
                     if (now - context.getLong("recoveryStartedTick") >= com.createdtr.defendtherealm.Config.RECOVERY_GRACE_TICKS.get()) {
                         context.putString("recoveryFailure", "Nested CBC runtime did not become ready: " + weaponReadiness);
-                        encounter.terminate(Encounter.Reason.RECOVERY_FAILED);
+                        context.putBoolean("combatIncapable", true);
                     }
                     data.updateContext(context);
                     return;
@@ -137,12 +152,13 @@ public final class AssaultController {
                 context.remove("recoveryFailure");
             } else if (weaponReadiness != PrototypeWeapon.Readiness.READY) {
                 context.putString("controllerFailure", "Autocannon unavailable during active encounter: " + weaponReadiness);
-                encounter.terminate(Encounter.Reason.WEAPON_FAILURE);
+                context.putBoolean("combatIncapable", true);
+                DRIVES.put(level, new Drive(encounter.id(), ship, current, target, false));
                 data.updateContext(context);
                 return;
             }
             PrototypeWeapon.stopAll(ship);
-            if (destructionConfirmed && !targetPresent) {
+            if (destructionConfirmed) {
                 int remaining = postImpactTicksRemaining(now, context.getLong("targetDestroyedTick"),
                         com.createdtr.defendtherealm.Config.POST_IMPACT_LINGER.get());
                 context.putInt("postImpactTicksRemaining", remaining);
@@ -154,25 +170,24 @@ public final class AssaultController {
                 data.updateContext(context);
                 return;
             }
-            if (destructionConfirmed) {
-                context.remove("targetDestroyedByProjectile");
-                context.remove("targetDestroyedTick");
-                context.remove("targetDestroyingProjectile");
-                context.remove("postImpactTicksRemaining");
-            }
             if (!context.contains("approachStarted")) context.putLong("approachStarted", now);
             if (now - context.getLong("approachStarted") > 7200
                     || encounter.state() == Encounter.State.APPROACHING && now - context.getLong("approachStarted") > 3600) {
-                encounter.terminate(Encounter.Reason.TIMEOUT); DRIVES.remove(level); data.updateContext(context); return;
+                context.putInt("elapsedTacticalTimeouts", context.getInt("elapsedTacticalTimeouts") + 1);
+                context.putLong("approachStarted", now);
+                context.remove("route");
+                context.putString("controllerStatus", "Tactical timeout; replanning from current position");
             }
             Vec3 muzzle = PrototypeWeapon.muzzle(ship, weaponMount);
             boolean hqInRange = weaponProfile.range().contains(muzzle.distanceTo(Vec3.atCenterOf(target)));
             boolean hqClear = hqInRange && PrototypeWeapon.assessClearShot(ship, weaponMount,
                     Vec3.atCenterOf(target), target, context, weaponProfile.trajectory());
             AssaultTargeting.Target combatTarget = AssaultTargeting.resolveOrSelect(level, current, muzzle, target,
-                    context, weaponProfile.range(), hqClear);
+                    context, weaponProfile.range(), hqClear,
+                    possibleTarget -> targetFeasible(ship, weaponMount, weaponProfile, possibleTarget));
             if (combatTarget == null) {
-                encounter.terminate(Encounter.Reason.OBSTRUCTED);
+                DRIVES.put(level, new Drive(encounter.id(), ship, current, target, false));
+                context.putString("controllerStatus", "No current weapon target; retaining assault");
                 data.updateContext(context);
                 return;
             }
@@ -184,7 +199,15 @@ public final class AssaultController {
                 // encountered along this corridor may interrupt firing briefly,
                 // but never replace or invalidate the cached HQ approach.
                 route = initialRoute(level, encounter.id(), current, target, envelope, weaponProfile.range());
-                if (route.isEmpty()) { encounter.terminate(Encounter.Reason.OBSTRUCTED); data.updateContext(context); return; }
+                if (route.isEmpty()) {
+                    context.putInt("routePlanFailures", context.getInt("routePlanFailures") + 1);
+                    context.putString("controllerStatus", "HQ route unavailable; retrying");
+                    DRIVES.put(level, new Drive(encounter.id(), ship, current, target, false));
+                    EncounterChunkTickets.update(level, data, ship, BlockPos.containing(current),
+                            BlockPos.containing(current), target);
+                    data.updateContext(context);
+                    return;
+                }
                 cursor = Math.min(1, route.size() - 1);
                 context.putLong("lastProgress", now); context.putDouble("progressDistance", Double.MAX_VALUE);
             }
@@ -210,6 +233,7 @@ public final class AssaultController {
                 }
             }
             Vec3 next = Vec3.atCenterOf(route.get(cursor));
+            observeHeadingProgress(ship, next, context, "approachHeading", "lastProgress", now);
             double distance = current.distanceTo(next);
             if (context.getDouble("progressDistance") - distance >= 1) {
                 context.putDouble("progressDistance", distance); context.putLong("lastProgress", now);
@@ -226,7 +250,7 @@ public final class AssaultController {
                 context.putInt("repairs", context.getInt("repairs") + 1);
                 if (repaired.isEmpty()) {
                     context.putInt("failedRepairs", context.getInt("failedRepairs") + 1);
-                    if (context.getInt("failedRepairs") >= 3) encounter.terminate(Encounter.Reason.OBSTRUCTED);
+                    context.putString("controllerStatus", "Route repair failed; retaining assault and retrying");
                     data.updateContext(context); return;
                 }
                 route = repaired; cursor = Math.min(1, route.size() - 1); next = Vec3.atCenterOf(route.get(cursor));
@@ -242,13 +266,14 @@ public final class AssaultController {
             if (cursor == route.size() - 1 && reached(current, next)
                     && encounter.state() == Encounter.State.APPROACHING)
                 encounter.advance(Encounter.State.ENGAGING);
-            boolean opportunity = combatTarget.type() == AssaultTargeting.Type.PLAYER
+            boolean opportunity = combatTarget.type() != AssaultTargeting.Type.HQ
                     && weaponProfile.range().contains(muzzle.distanceTo(combatTarget.aim()));
             if (opportunity && encounter.state() == Encounter.State.APPROACHING)
                 encounter.advance(Encounter.State.ENGAGING);
             // Independent turrets never steer the hull at their tactical target.
             DRIVES.put(level, new Drive(encounter.id(), ship, next, target, false));
-            boolean atFiringPoint = opportunity || encounter.combatEnabled() && reached(current, next);
+            boolean atFiringPoint = opportunity || encounter.combatEnabled()
+                    && (tacticalManeuver || reached(current, next));
             TacticalResult tactical = tickTactics(level, ship, weaponMount, weaponProfile, encounter, context,
                     combatTarget, current, route, cursor, envelope, atFiringPoint);
             route = tactical.route();
@@ -256,17 +281,18 @@ public final class AssaultController {
             if (tactical.destination() != null)
                 DRIVES.put(level, new Drive(encounter.id(), ship, tactical.destination(), target, false));
             tickAdditionalWeapons(level, ship, combatProfile, weaponMount, current, target, context);
+            sendTurretPoses(level, ship, current, context);
             context.putLongArray("route", route.stream().mapToLong(BlockPos::asLong).toArray());
             context.putInt("routeCursor", cursor);
             sendDebug(level, encounter, context, combatTarget, current, route, cursor);
             data.updateContext(context);
             EncounterChunkTickets.update(level, data, ship, BlockPos.containing(current), route.get(cursor), target);
         } catch (RuntimeException ex) {
-            DRIVES.remove(level);
             context.putString("controllerFailure", ex.toString());
-            encounter.terminate(Encounter.Reason.WEAPON_FAILURE);
+            context.putInt("controllerFailures", context.getInt("controllerFailures") + 1);
+            context.putBoolean("controllerSuspended", true);
             data.updateContext(context);
-            CreateDefendtheRealm.LOGGER.error("HQ assault {} stopped", encounter.id(), ex);
+            CreateDefendtheRealm.LOGGER.error("HQ assault {} suspended without cleanup", encounter.id(), ex);
         }
     }
 
@@ -315,20 +341,26 @@ public final class AssaultController {
             boolean hqClear = hqInRange && PrototypeWeapon.assessClearShot(ship, mount, Vec3.atCenterOf(hq), hq,
                     state, weapon.trajectory());
             AssaultTargeting.Target selected = AssaultTargeting.resolveOrSelect(level, current, muzzle, hq, state,
-                    weapon.range(), hqClear);
+                    weapon.range(), hqClear, candidate -> targetFeasible(ship, mount, weapon, candidate));
             if (selected == null) { PrototypeWeapon.stop(mount); continue; }
             boolean inRange = weapon.range().contains(muzzle.distanceTo(selected.aim()));
             boolean breach = selected.type() == AssaultTargeting.Type.HQ && !hqClear && weapon.breachCapable();
             long blocker = state.contains("shotBlockedAt") ? state.getLong("shotBlockedAt") : Long.MIN_VALUE;
-            boolean breachAllowed = breach && blocker != Long.MIN_VALUE
-                    && breachAllowed(state.getInt("breachShots"), weapon.breachShotLimit());
             int before = context.getInt("shots");
-            tickWeapon(ship, mount, weapon, selected, context, inRange && (!breach || breachAllowed), breachAllowed);
-            if (breachAllowed && context.getInt("shots") > before) {
+            boolean breachShot = breach && blocker != Long.MIN_VALUE;
+            tickWeapon(ship, mount, weapon, selected, context, inRange, breachShot);
+            if (breachShot && context.getInt("shots") > before) {
                 WeaponRuntime.incrementBlocker(state, blocker);
                 state.putInt("breachShots", state.getInt("breachShots") + 1);
             }
         }
+    }
+
+    private static boolean targetFeasible(ServerSubLevel ship, CannonMountBlockEntity mount,
+            com.createdtr.defendtherealm.combat.WeaponProfile weapon, AssaultTargeting.Target target) {
+        CompoundTag probe = new CompoundTag();
+        BlockPos accepted = target.type() == AssaultTargeting.Type.PLAYER ? null : target.block();
+        return PrototypeWeapon.assessClearShot(ship, mount, target.aim(), accepted, probe, weapon.trajectory());
     }
 
     private static void sendDebug(ServerLevel level, Encounter encounter, CompoundTag context,
@@ -350,6 +382,29 @@ public final class AssaultController {
         for (var player : level.players()) if (player.hasPermissions(2)) PacketDistributor.sendToPlayer(player, payload);
     }
 
+    private static void sendTurretPoses(ServerLevel level, ServerSubLevel ship, Vec3 current, CompoundTag context) {
+        var poses = new java.util.ArrayList<com.createdtr.defendtherealm.network.TurretPosePayload.Pose>();
+        int hash = 1;
+        for (CannonMountBlockEntity mount : PrototypeWeapon.findAll(ship)) {
+            var entity = mount.getContraption();
+            if (entity == null) continue;
+            poses.add(new com.createdtr.defendtherealm.network.TurretPosePayload.Pose(
+                    mount.getBlockPos().asLong(), entity.getId(), entity.getUUID(), entity.yaw, entity.pitch));
+            hash = 31 * hash + Long.hashCode(mount.getBlockPos().asLong());
+            hash = 31 * hash + Float.floatToIntBits(entity.yaw);
+            hash = 31 * hash + Float.floatToIntBits(entity.pitch);
+        }
+        long now = level.getGameTime();
+        if (poses.isEmpty() || hash == context.getInt("lastTurretPoseHash")
+                && now - context.getLong("lastTurretPosePacketTick") < 20) return;
+        context.putInt("lastTurretPoseHash", hash);
+        context.putLong("lastTurretPosePacketTick", now);
+        var payload = new com.createdtr.defendtherealm.network.TurretPosePayload(
+                level.dimension().location().toString(), ship.getUniqueId(), now, poses);
+        PacketDistributor.sendToPlayersTrackingChunk(level,
+                new net.minecraft.world.level.ChunkPos(BlockPos.containing(current)), payload);
+    }
+
     private static TacticalResult tickTactics(ServerLevel level, ServerSubLevel ship, CannonMountBlockEntity mount,
             com.createdtr.defendtherealm.combat.WeaponProfile weapon, Encounter encounter,
             CompoundTag context, AssaultTargeting.Target target, Vec3 current, List<BlockPos> route,
@@ -359,28 +414,16 @@ public final class AssaultController {
             return new TacticalResult(route, cursor, Vec3.atCenterOf(route.get(cursor)));
         }
         long now = level.getGameTime();
-        if (target.type() == AssaultTargeting.Type.PLAYER) {
-            UUID playerId = UUID.fromString(target.key().substring("player:".length()));
-            if (context.hasUUID("lastPlayerHitTarget")
-                    && context.getUUID("lastPlayerHitTarget").equals(playerId)) {
-                context.putString("lastRejectedTarget", target.key());
-                context.putString("lastRejectedReason", "player_hit");
-                AssaultTargeting.rejectCurrent(context);
-                return new TacticalResult(route, cursor, Vec3.atCenterOf(route.get(cursor)));
-            }
-            if (context.getInt("opportunityShots") >= 3 && now >= context.getLong("nextShot")) {
-                context.putString("lastRejectedTarget", target.key());
-                context.putString("lastRejectedReason", "opportunity_shot_limit");
-                AssaultTargeting.rejectCurrent(context);
-                return new TacticalResult(route, cursor, Vec3.atCenterOf(route.get(cursor)));
-            }
+        if (target.type() != AssaultTargeting.Type.HQ) {
+            TacticalResult movement = advanceManeuver(level, ship, encounter, context, current, route, cursor, envelope);
+            if (movement == null) movement = new TacticalResult(route, cursor, Vec3.atCenterOf(route.get(cursor)));
             int before = context.getInt("shots");
             tickWeapon(ship, mount, weapon, target, context, true, false);
             int consumed = Math.max(0, context.getInt("shots") - before);
             if (consumed > 0) context.putInt("opportunityShots", context.getInt("opportunityShots") + consumed);
             if (!context.getBoolean("clearShot")) {
                 context.putString("lastRejectedTarget", target.key());
-                context.putString("lastRejectedReason", "player_not_in_line_of_sight");
+                context.putString("lastRejectedReason", "opportunity_target_not_in_line_of_sight");
                 AssaultTargeting.rejectCurrent(context);
             } else {
                 context.putString("tacticalPhase", "OPPORTUNITY_FIRE");
@@ -416,9 +459,14 @@ public final class AssaultController {
             }
             // An independently traversing weapon opportunistically engages
             // without replacing the strategic route with a stationary hold.
-            return new TacticalResult(route, cursor, Vec3.atCenterOf(route.get(cursor)));
+            return movement;
         }
-        tickWeapon(ship, mount, weapon, target, context, true, false);
+        boolean breachIntent = target.type() == AssaultTargeting.Type.HQ && weapon.breachCapable()
+                && context.contains("shotBlockedAt") && !context.getBoolean("shotBlockedSelf")
+                && !"unloaded".equals(context.getString("shotBlockedBy"));
+        long blockerBeforeShot = breachIntent ? context.getLong("shotBlockedAt") : Long.MIN_VALUE;
+        int shotsBeforeTick = context.getInt("shots");
+        tickWeapon(ship, mount, weapon, target, context, true, breachIntent);
         boolean clearShot = context.getBoolean("clearShot");
         if (clearShot) {
             context.putString("tacticalPhase", "ENGAGE");
@@ -428,82 +476,19 @@ public final class AssaultController {
         if (target.type() == AssaultTargeting.Type.HQ && weapon.breachCapable() && usableBlocker) {
             long blocker = context.getLong("shotBlockedAt");
             CompoundTag weaponState = WeaponRuntime.state(context, weapon.id());
-            int used = context.getInt("breachShots");
-            if (breachAllowed(used, weapon.breachShotLimit())) {
-                int before = context.getInt("shots");
-                tickWeapon(ship, mount, weapon, target, context, true, true);
-                int consumed = Math.max(0, context.getInt("shots") - before);
-                if (consumed > 0) {
-                    int blockerShots = WeaponRuntime.incrementBlocker(weaponState, blocker);
-                    context.putInt("breachShots", used + consumed);
-                    context.putInt("currentBlockerShots", blockerShots);
-                    context.putLong("lastBreachTarget", blocker);
-                }
-            } else if (clearShot) {
-                clearManeuver(context);
-                context.putInt("orbitAttempts", 0);
-                context.remove("orbitSearchStartedTick");
-                context.remove("maneuverHoldX"); context.remove("maneuverHoldY"); context.remove("maneuverHoldZ");
-                return new TacticalResult(route, cursor, current);
-            } else {
-                context.putInt("currentBlockerShots",
-                        WeaponRuntime.blockerBudgets(weaponState).getOrDefault(blocker, 0));
+            int consumed = Math.max(0, context.getInt("shots") - shotsBeforeTick);
+            if (consumed > 0) {
+                int blockerShots = WeaponRuntime.incrementBlocker(weaponState,
+                        blockerBeforeShot == Long.MIN_VALUE ? blocker : blockerBeforeShot);
+                context.putInt("breachShots", context.getInt("breachShots") + consumed);
+                context.putInt("currentBlockerShots", blockerShots);
+                context.putLong("lastBreachTarget", blocker);
             }
             context.putString("tacticalPhase", "ORBIT_AND_BREACH");
         }
 
-        long[] maneuverValues = context.getLongArray("maneuverRoute");
-        if (maneuverValues.length > 0) {
-            List<BlockPos> maneuver = java.util.Arrays.stream(maneuverValues).mapToObj(BlockPos::of).toList();
-            int maneuverCursor = Math.clamp(context.getInt("maneuverCursor"), 0, maneuver.size() - 1);
-            var planner = RoutePlanners.get(VehicleFamily.HOVER_AIRSHIP, "hover_airship");
-            while (maneuverCursor < maneuver.size() - 1 && (reached(current, Vec3.atCenterOf(maneuver.get(maneuverCursor)))
-                    || maneuverCursor + 1 < maneuver.size()
-                            && planner.hasClearSegment(level, current, Vec3.atCenterOf(maneuver.get(maneuverCursor + 1)), envelope)
-                            && current.distanceTo(Vec3.atCenterOf(maneuver.get(maneuverCursor + 1)))
-                                    < current.distanceTo(Vec3.atCenterOf(maneuver.get(maneuverCursor))))) {
-                maneuverCursor++;
-                resetManeuverProgress(context, now);
-            }
-            for (int i = maneuver.size() - 1; i > maneuverCursor; i--) {
-                Vec3 lookahead = Vec3.atCenterOf(maneuver.get(i));
-                if (current.distanceTo(lookahead) <= ROUTE_LOOKAHEAD_DISTANCE
-                        && planner.hasClearSegment(level, current, lookahead, envelope)) {
-                    maneuverCursor = i;
-                    resetManeuverProgress(context, now);
-                    break;
-                }
-            }
-            context.putInt("maneuverCursor", maneuverCursor);
-            Vec3 destination = Vec3.atCenterOf(maneuver.get(maneuverCursor));
-            double distance = current.distanceTo(destination);
-            if (!context.contains("maneuverLastProgress")) resetManeuverProgress(context, now);
-            if (!context.contains("maneuverProgressDistance")
-                    || context.getDouble("maneuverProgressDistance") - distance >= 1) {
-                context.putDouble("maneuverProgressDistance", distance);
-                context.putLong("maneuverLastProgress", now);
-            }
-            context.putDouble("maneuverWaypointDistance", distance);
-            context.putLong("maneuverDestination", maneuver.get(maneuverCursor).asLong());
-            boolean obstructed = now % 10 == 0 && !planner.hasClearSegment(level, current, destination, envelope);
-            boolean stuck = !reached(current, destination)
-                    && now - context.getLong("maneuverLastProgress") >= MANEUVER_STUCK_TICKS;
-            if (!obstructed && !stuck && (maneuverCursor < maneuver.size() - 1 || !reached(current, destination)))
-                return new TacticalResult(route, cursor, destination);
-            if (obstructed || stuck) {
-                context.putString("lastOrbitFailure", obstructed ? "segment_obstructed" : "stalled");
-                context.putInt("maneuverStalledTicks",
-                        (int) Math.min(Integer.MAX_VALUE, now - context.getLong("maneuverLastProgress")));
-                clearManeuver(context);
-                context.putLong("nextLosSearch", now);
-                CreateDefendtheRealm.LOGGER.info("Assault {} rejected orbit candidate {}: {}",
-                        encounter.id(), context.getLong("orbitCandidate"), context.getString("lastOrbitFailure"));
-            } else {
-                context.putString("lastOrbitFailure", "candidate_reached_without_line_of_sight");
-                clearManeuver(context);
-                return new TacticalResult(route, cursor, holdDestination(context, current));
-            }
-        }
+        TacticalResult activeManeuver = advanceManeuver(level, ship, encounter, context, current, route, cursor, envelope);
+        if (activeManeuver != null) return activeManeuver;
         if (clearShot) {
             context.putInt("orbitAttempts", 0);
             context.remove("orbitSearchStartedTick");
@@ -514,9 +499,10 @@ public final class AssaultController {
             return new TacticalResult(route, cursor, holdDestination(context, current));
         if (!context.contains("orbitSearchStartedTick")) context.putLong("orbitSearchStartedTick", now);
         if (now - context.getLong("orbitSearchStartedTick") >= MANEUVER_SEARCH_DEADLINE_TICKS) {
-            context.putString("lastRejectedTarget", target.key());
-            context.putString("lastRejectedReason", "orbit_progress_timeout");
-            AssaultTargeting.rejectCurrent(context);
+            context.putString("lastOrbitFailure", "orbit_progress_timeout");
+            context.putInt("orbitCycles", context.getInt("orbitCycles") + 1);
+            context.putInt("orbitAttempts", 0);
+            context.putLong("orbitSearchStartedTick", now);
             clearManeuver(context);
             return new TacticalResult(route, cursor, holdDestination(context, current));
         }
@@ -558,17 +544,98 @@ public final class AssaultController {
             context.putLong("nextLosSearch", now + 1);
             return new TacticalResult(route, cursor, holdDestination(context, current));
         }
-        context.putString("lastRejectedTarget", target.key());
-        context.putString("lastRejectedReason", "range_orbit_exhausted");
+        context.putString("lastOrbitFailure", "range_orbit_exhausted");
+        context.putInt("orbitCycles", context.getInt("orbitCycles") + 1);
+        context.putInt("orbitAttempts", 0);
+        context.putLong("orbitSearchStartedTick", now);
         CreateDefendtheRealm.LOGGER.info("Assault {} exhausted {} orbit candidates for {}",
                 encounter.id(), totalAttempts, target.key());
-        AssaultTargeting.rejectCurrent(context);
         clearManeuver(context);
         return new TacticalResult(route, cursor, holdDestination(context, current));
     }
 
-    static boolean breachAllowed(int shotsUsed, int shotLimit) {
-        return shotsUsed >= 0 && shotsUsed < shotLimit;
+    private static TacticalResult advanceManeuver(ServerLevel level, ServerSubLevel ship, Encounter encounter,
+            CompoundTag context, Vec3 current, List<BlockPos> route, int cursor, Envelope envelope) {
+        long now = level.getGameTime();
+        long[] maneuverValues = context.getLongArray("maneuverRoute");
+        if (maneuverValues.length > 0) {
+            List<BlockPos> maneuver = java.util.Arrays.stream(maneuverValues).mapToObj(BlockPos::of).toList();
+            int maneuverCursor = Math.clamp(context.getInt("maneuverCursor"), 0, maneuver.size() - 1);
+            var planner = RoutePlanners.get(VehicleFamily.HOVER_AIRSHIP, "hover_airship");
+            while (maneuverCursor < maneuver.size() - 1 && (reached(current, Vec3.atCenterOf(maneuver.get(maneuverCursor)))
+                    || maneuverCursor + 1 < maneuver.size()
+                            && planner.hasClearSegment(level, current, Vec3.atCenterOf(maneuver.get(maneuverCursor + 1)), envelope)
+                            && current.distanceTo(Vec3.atCenterOf(maneuver.get(maneuverCursor + 1)))
+                                    < current.distanceTo(Vec3.atCenterOf(maneuver.get(maneuverCursor))))) {
+                maneuverCursor++;
+                resetManeuverProgress(context, now);
+            }
+            for (int i = maneuver.size() - 1; i > maneuverCursor; i--) {
+                Vec3 lookahead = Vec3.atCenterOf(maneuver.get(i));
+                if (current.distanceTo(lookahead) <= ROUTE_LOOKAHEAD_DISTANCE
+                        && planner.hasClearSegment(level, current, lookahead, envelope)) {
+                    maneuverCursor = i;
+                    resetManeuverProgress(context, now);
+                    break;
+                }
+            }
+            context.putInt("maneuverCursor", maneuverCursor);
+            Vec3 destination = Vec3.atCenterOf(maneuver.get(maneuverCursor));
+            observeHeadingProgress(ship, destination, context,
+                    "maneuverHeading", "maneuverLastProgress", now);
+            double distance = current.distanceTo(destination);
+            if (!context.contains("maneuverLastProgress")) resetManeuverProgress(context, now);
+            if (!context.contains("maneuverProgressDistance")
+                    || context.getDouble("maneuverProgressDistance") - distance >= 1) {
+                context.putDouble("maneuverProgressDistance", distance);
+                context.putLong("maneuverLastProgress", now);
+            }
+            context.putDouble("maneuverWaypointDistance", distance);
+            context.putLong("maneuverDestination", maneuver.get(maneuverCursor).asLong());
+            boolean obstructed = now % 10 == 0 && !planner.hasClearSegment(level, current, destination, envelope);
+            boolean stuck = !reached(current, destination)
+                    && now - context.getLong("maneuverLastProgress") >= MANEUVER_STUCK_TICKS;
+            if (!obstructed && !stuck && (maneuverCursor < maneuver.size() - 1 || !reached(current, destination)))
+                return new TacticalResult(route, cursor, destination);
+            if (obstructed || stuck) {
+                context.putString("lastOrbitFailure", obstructed ? "segment_obstructed" : "stalled");
+                context.putInt("maneuverStalledTicks",
+                        (int) Math.min(Integer.MAX_VALUE, now - context.getLong("maneuverLastProgress")));
+                clearManeuver(context);
+                context.putLong("nextLosSearch", now);
+                CreateDefendtheRealm.LOGGER.info("Assault {} rejected orbit candidate {}: {}",
+                        encounter.id(), context.getLong("orbitCandidate"), context.getString("lastOrbitFailure"));
+            } else {
+                context.putString("lastOrbitFailure", "candidate_reached_without_line_of_sight");
+                clearManeuver(context);
+                return new TacticalResult(route, cursor, holdDestination(context, current));
+            }
+        }
+        return null;
+    }
+
+    private static void observeHeadingProgress(ServerSubLevel ship, Vec3 destination, CompoundTag context,
+            String key, String timer, long now) {
+        Vector3d forward = ship.logicalPose().transformNormal(new Vector3d(0, 0, -1));
+        Vector3d to = new Vector3d(destination.x, 0, destination.z)
+                .sub(ship.logicalPose().position().x(), 0, ship.logicalPose().position().z());
+        double error = to.lengthSquared() < 1.0e-6 ? 0 : Math.abs(Math.toDegrees(Math.atan2(
+                forward.z * to.x - forward.x * to.z, forward.x * to.x + forward.z * to.z)));
+        recordHeadingProgress(context, key, timer, BlockPos.containing(destination).asLong(), error, now);
+    }
+
+    static void recordHeadingProgress(CompoundTag context, String key, String timer,
+            long destination, double error, long now) {
+        if (!context.contains(key + "Destination") || context.getLong(key + "Destination") != destination) {
+            context.putLong(key + "Destination", destination);
+            context.putDouble(key, error);
+            context.putLong(timer, now);
+        } else if (context.getDouble(key) - error >= 2) {
+            // Only a new best heading counts; stationary or oscillating turns
+            // still expire through the normal bounded stall timeout.
+            context.putDouble(key, error);
+            context.putLong(timer, now);
+        }
     }
 
     static boolean reached(Vec3 current, Vec3 destination) {
@@ -576,12 +643,16 @@ public final class AssaultController {
     }
 
     private static void resetManeuverProgress(CompoundTag context, long now) {
+        context.remove("maneuverHeadingDestination");
+        context.remove("maneuverHeading");
         context.putLong("maneuverLastProgress", now);
         context.putDouble("maneuverProgressDistance", Double.MAX_VALUE);
         context.putInt("maneuverStalledTicks", 0);
     }
 
     private static void clearManeuver(CompoundTag context) {
+        context.remove("maneuverHeadingDestination");
+        context.remove("maneuverHeading");
         context.remove("maneuverRoute");
         context.remove("maneuverCursor");
         context.remove("maneuverDestination");
@@ -621,8 +692,10 @@ public final class AssaultController {
         state.putBoolean("trajectoryReachable", context.getBoolean("trajectoryReachable"));
         state.putString("fireSolution", context.getString("fireSolution"));
         for (String key : List.of("desiredBarrelX", "desiredBarrelY", "desiredBarrelZ",
-                "actualBarrelX", "actualBarrelY", "actualBarrelZ", "predictedImpactX",
-                "predictedImpactY", "predictedImpactZ", "predictedFlightTicks"))
+                "actualBarrelX", "actualBarrelY", "actualBarrelZ", "firingBarrelX", "firingBarrelY",
+                "firingBarrelZ", "predictedImpactX", "predictedImpactY", "predictedImpactZ",
+                "predictedFlightTicks", "firingAimError", "renderAimError", "projectileSpawnError",
+                "projectileDirectionError"))
             if (context.contains(key)) state.putDouble(key, context.getDouble(key));
         state.putInt("shots", state.getInt("shots") + Math.max(0, context.getInt("shots") - before));
     }

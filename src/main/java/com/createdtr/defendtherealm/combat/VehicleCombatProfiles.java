@@ -73,9 +73,6 @@ public final class VehicleCombatProfiles {
                             trajectory.has("drag_per_tick") ? trajectory.get("drag_per_tick").getAsDouble() : 0,
                             trajectory.has("maximum_flight_ticks") ? trajectory.get("maximum_flight_ticks").getAsInt() : 200),
                     weapon.has("breach_capable") && weapon.get("breach_capable").getAsBoolean(),
-                    weapon.has("breach_shot_limit") ? weapon.get("breach_shot_limit").getAsInt()
-                            : weapon.has("breach_shots_per_blocker")
-                                    ? weapon.get("breach_shots_per_blocker").getAsInt() : 0,
                     mount);
         }).toList();
         return new VehicleCombatProfile(id, template, family, navigation, weapons);

@@ -10,6 +10,7 @@ import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.neoforge.client.gui.ConfigurationScreen;
 import net.neoforged.neoforge.client.gui.IConfigScreenFactory;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.RenderType;
@@ -27,6 +28,44 @@ public class CreateDefendtheRealmClient {
         // Do not forget to add translations for your config options to the en_us.json file.
         container.registerExtensionPoint(IConfigScreenFactory.class, ConfigurationScreen::new);
         NeoForge.EVENT_BUS.addListener(CreateDefendtheRealmClient::renderAssaultRoute);
+        NeoForge.EVENT_BUS.addListener(CreateDefendtheRealmClient::applyTurretPoses);
+    }
+
+    static void applyTurretPoses(ClientTickEvent.Post event) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null) {
+            com.createdtr.defendtherealm.network.TurretPoseState.clear();
+            return;
+        }
+        var container = dev.ryanhcode.sable.api.sublevel.SubLevelContainer.getContainer(minecraft.level);
+        if (container == null) return;
+        String dimension = minecraft.level.dimension().location().toString();
+        long now = minecraft.level.getGameTime();
+        for (var payload : com.createdtr.defendtherealm.network.TurretPoseState.latest()) {
+            if (!dimension.equals(payload.dimension())) continue;
+            if (now - payload.serverTick() > 100) {
+                com.createdtr.defendtherealm.network.TurretPoseState.remove(payload.vehicle());
+                continue;
+            }
+            var subLevel = container.getSubLevel(payload.vehicle());
+            if (subLevel == null || subLevel.isRemoved()) continue;
+            for (var pose : payload.poses()) {
+                var blockEntity = subLevel.getLevel().getBlockEntity(BlockPos.of(pose.mountPosition()));
+                if (!(blockEntity instanceof rbasamoyai.createbigcannons.cannon_control.cannon_mount.CannonMountBlockEntity mount))
+                    continue;
+                var cannon = mount.getContraption();
+                if (cannon == null || cannon.getId() != pose.entityId()
+                        || !cannon.getUUID().equals(pose.entityUuid())) continue;
+                var initial = cannon.getInitialOrientation();
+                float sign = (initial.getAxisDirection() == net.minecraft.core.Direction.AxisDirection.POSITIVE)
+                        == (initial.getAxis() == net.minecraft.core.Direction.Axis.X) ? 1 : -1;
+                mount.setYaw(pose.yaw());
+                mount.setPitch(pose.pitch() * sign);
+                ((com.createdtr.defendtherealm.mixin.CannonMountRotationInvoker) mount).dtr$applyRotation();
+                cannon.yaw = pose.yaw();
+                cannon.pitch = pose.pitch();
+            }
+        }
     }
 
     @SubscribeEvent

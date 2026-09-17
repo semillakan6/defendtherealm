@@ -29,7 +29,7 @@ public final class BalloonAssaultGameTest {
         // Keep the entire firing lane beyond the GameTest structure's barrier
         // shell. The shell is test infrastructure, not an assault obstacle.
         BlockPos target = helper.absolutePos(new BlockPos(12, 12, 40));
-        BlockPos spawn = target.offset(0, 20, 100);
+        BlockPos spawn = target.offset(0, 20, 120);
         // Test-owned loading only; runtime assaults never force terrain chunks.
         for (int x = (spawn.getX() >> 4) - 8; x <= (spawn.getX() >> 4) + 8; x++)
             for (int z = (spawn.getZ() >> 4) - 12; z <= (spawn.getZ() >> 4) + 8; z++) level.setChunkForced(x, z, true);
@@ -39,14 +39,28 @@ public final class BalloonAssaultGameTest {
                 // the function is scheduled, so install the external target at
                 // the same moment the assault begins.
                 level.setBlockAndUpdate(target, CreateDefendtheRealm.DEV_HQ.get().defaultBlockState());
+                // More than 48 blocks off the HQ route: acquisition must use
+                // this weapon's envelope, not the retired corridor heuristic.
+                var targetPlayer = createNetworkedTestPlayer(helper, target.getX() + 55.5,
+                        spawn.getY() - 5, target.getZ() + 75.5);
+                // A newly joined ServerPlayer has vanilla spawn immunity. Let
+                // it expire so this test observes CBC's real damage result
+                // instead of bypassing or simulating damage in the add-on.
+                helper.runAfterDelay(80, () -> spawnAssault(helper, target, spawn, targetPlayer));
+            } catch (Exception ex) { release(helper, spawn); helper.fail("Fixture setup failed: " + ex); }
+        });
+    }
+
+    private static void spawnAssault(GameTestHelper helper, BlockPos target, BlockPos spawn,
+            net.minecraft.server.level.ServerPlayer targetPlayer) {
+        var level = helper.getLevel();
+        try {
                 // Placement needs an owner identity, not a connected client. Joining a mock
                 // player triggers Simulated custom-payload negotiation that GameTest lacks.
                 var player = new net.minecraft.server.level.ServerPlayer(level.getServer(), level,
                         new com.mojang.authlib.GameProfile(java.util.UUID.randomUUID(), "DTRFixture"),
                         net.minecraft.server.level.ClientInformation.createDefault());
                 var result = ToolgunPrototypeSpawner.spawnFixture(player, spawn, target);
-                var targetPlayer = createNetworkedTestPlayer(helper, target.getX() + 0.5,
-                        spawn.getY() - 5, target.getZ() + 55.5);
                 var data = EncounterSavedData.get(level.getServer());
                 var testContext = data.context();
                 testContext.putUUID("fixtureTargetPlayer", targetPlayer.getUUID());
@@ -63,8 +77,7 @@ public final class BalloonAssaultGameTest {
                 helper.assertTrue(forward.normalize().dot(desired) > 0.9998,
                         "Vehicle faces HQ before assisted steering");
                 observe(helper, spawn);
-            } catch (Exception ex) { release(helper, spawn); helper.fail("Fixture spawn failed: " + ex); }
-        });
+        } catch (Exception ex) { release(helper, spawn); helper.fail("Fixture spawn failed: " + ex); }
     }
     private static void observe(GameTestHelper helper, BlockPos spawn) {
         var data = EncounterSavedData.get(helper.getLevel().getServer());
@@ -108,6 +121,13 @@ public final class BalloonAssaultGameTest {
             helper.assertTrue(context.getBoolean("targetDestroyedByProjectile"), "CBC projectile destruction is recorded");
             helper.assertTrue(context.getBoolean("fixtureBarrelAlignmentVerified"),
                     "A real shot is authorized only after the visible post-update barrel vector aligns");
+            helper.assertTrue(Math.abs(context.getLong("projectilePoseTickDelta")) <= 1,
+                    "CBC projectile is compared with the authorization pose no later than CBC's next tick");
+            helper.assertTrue(context.getDouble("projectileSpawnError") <= 0.25,
+                    "CBC projectile begins at its recorded muzzle; error=" + context.getDouble("projectileSpawnError"));
+            helper.assertTrue(context.getDouble("projectileDirectionError") <= 3,
+                    "CBC projectile follows the recorded barrel direction; error="
+                            + context.getDouble("projectileDirectionError"));
             helper.assertTrue(context.getBoolean("fixturePlayerDamageVerified"),
                     "Independent turret damages the survival player encountered before attacking the HQ; requested="
                             + context.getFloat("playerCbcDamageRequested") + " accepted="
@@ -123,6 +143,17 @@ public final class BalloonAssaultGameTest {
                     >= com.createdtr.defendtherealm.encounter.AssaultController.POST_IMPACT_LINGER_TICKS,
                     "Cleanup waits for the complete post-impact linger");
             helper.assertTrue(context.getInt("shots") > 0 && context.getInt("shots") == context.getInt("replenishments"), "Real shots replenished");
+            helper.assertTrue(context.getInt("spentItemChecks") == context.getInt("shots"),
+                    "Every encounter-controlled autocannon shot applies the spent-item policy");
+            var casingDrops = java.util.stream.StreamSupport.stream(
+                            helper.getLevel().getAllEntities().spliterator(), false)
+                    .filter(net.minecraft.world.entity.item.ItemEntity.class::isInstance)
+                    .map(net.minecraft.world.entity.item.ItemEntity.class::cast)
+                    .filter(item -> net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(item.getItem().getItem())
+                            .toString().equals("createbigcannons:empty_autocannon_cartridge"))
+                    .count();
+            helper.assertTrue(casingDrops == 0,
+                    "Encounter-controlled fire leaves no reusable empty autocannon cartridges; found " + casingDrops);
             startDamageScenario(helper, spawn);
             return;
         }
@@ -334,9 +365,17 @@ public final class BalloonAssaultGameTest {
         var data = EncounterSavedData.get(helper.getLevel().getServer());
         var encounter = data.encounter();
         var context = data.context();
-        helper.assertTrue(context.getInt("breachShots") <= 3,
-                "A blocked target receives at most three total breach shots; got " + context.getInt("breachShots"));
+        if (context.getInt("breachShots") >= 4 && !context.getBoolean("fixtureWallClearedAfterContinuousFire")) {
+            context.putBoolean("fixtureWallClearedAfterContinuousFire", true);
+            data.updateContext(context);
+            clearWall(helper, target);
+        }
         if (context.getLongArray("maneuverRoute").length > 0) {
+            if (!context.getBoolean("fixtureManeuverObserved")) {
+                context.putDouble("fixtureOrbitStartX", context.getDouble("vehicleX"));
+                context.putDouble("fixtureOrbitStartY", context.getDouble("vehicleY"));
+                context.putDouble("fixtureOrbitStartZ", context.getDouble("vehicleZ"));
+            }
             double dx = context.getDouble("vehicleX") - context.getDouble("fixtureOrbitStartX");
             double dy = context.getDouble("vehicleY") - context.getDouble("fixtureOrbitStartY");
             double dz = context.getDouble("vehicleZ") - context.getDouble("fixtureOrbitStartZ");
@@ -348,13 +387,10 @@ public final class BalloonAssaultGameTest {
         if (encounter.state() == Encounter.State.COMPLETED) {
             clearWall(helper, target);
             release(helper, spawn);
-            helper.assertTrue(encounter.reason() == Encounter.Reason.TARGET_DESTROYED
-                            || encounter.reason() == Encounter.Reason.OBSTRUCTED,
-                    "Blocked lane has a bounded tactical outcome, got " + encounter.reason());
-            helper.assertTrue(encounter.reason() != Encounter.Reason.TIMEOUT,
-                    "Blocked-lane recovery must not wait for the global encounter timeout");
-            helper.assertTrue(helper.getLevel().getGameTime() - context.getLong("fixtureBlockedStarted") < 1800,
-                    "Blocked-lane recovery completes within its tactical deadline");
+            helper.assertTrue(encounter.reason() == Encounter.Reason.TARGET_DESTROYED,
+                    "Blocked assault ends only after HQ destruction, got " + encounter.reason());
+            helper.assertTrue(context.getInt("breachShots") >= 4,
+                    "Blocked target receives continuous cadence-controlled fire beyond three shots");
             if (context.getBoolean("fixtureManeuverObserved"))
                 helper.assertTrue(context.getDouble("fixtureMaximumManeuverDisplacement") > 3,
                         "An accepted orbit route produces meaningful vehicle displacement");

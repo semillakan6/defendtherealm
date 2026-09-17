@@ -95,6 +95,26 @@ public final class EncounterChecks {
         checkPhysicalIdentityAndDefeatTimer();
         checkTargetCorridor();
         checkCombatProfiles();
+        double hullDegreesPerTick = Math.toDegrees(0.5) / 20;
+        double gunWorldYaw = 0;
+        for (int tick = 0; tick < 120; tick++) {
+            gunWorldYaw += hullDegreesPerTick;
+            gunWorldYaw += com.createdtr.defendtherealm.combat.TurretStabilization.step(-hullDegreesPerTick, 0);
+        }
+        check(Math.abs(gunWorldYaw) < 1.0e-9, "Turret retains world heading throughout maximum-rate hull turn");
+        check(com.createdtr.defendtherealm.combat.TurretStabilization.step(-hullDegreesPerTick, 30)
+                > -hullDegreesPerTick, "Turret can track a new target while compensating hull motion");
+        check(Math.abs(com.createdtr.defendtherealm.combat.TurretStabilization.step(100, 100)) <= 3,
+                "Stabilization remains bounded after discontinuous restoration");
+        var heading = new CompoundTag();
+        AssaultController.recordHeadingProgress(heading, "heading", "progress", 1, 170, 0);
+        AssaultController.recordHeadingProgress(heading, "heading", "progress", 1, 140, 90);
+        check(heading.getLong("progress") == 90, "Turning toward waypoint counts as progress");
+        AssaultController.recordHeadingProgress(heading, "heading", "progress", 1, 170, 110);
+        AssaultController.recordHeadingProgress(heading, "heading", "progress", 1, 140, 150);
+        check(heading.getLong("progress") == 90, "Heading oscillation cannot extend stall timeout");
+        AssaultController.recordHeadingProgress(heading, "heading", "progress", 2, 175, 160);
+        check(heading.getLong("progress") == 160, "New waypoint starts its own turning budget");
         System.out.println("Encounter checks passed: " + checks);
     }
 
@@ -184,12 +204,15 @@ public final class EncounterChecks {
                 "Schema 2 context migrates into schema 5");
     }
     private static void checkTargetCorridor() {
-        check(AssaultTargeting.qualifies(new Vec3(50, 0, 20), Vec3.ZERO, new Vec3(100, 0, 0)),
-                "Player near assault corridor qualifies");
-        check(AssaultTargeting.qualifies(new Vec3(100, 0, 100), Vec3.ZERO, new Vec3(100, 0, 0)),
-                "Player inside HQ perimeter qualifies");
-        check(!AssaultTargeting.qualifies(new Vec3(0, 0, 200), Vec3.ZERO, new Vec3(100, 0, 0)),
-                "Distant player outside corridor does not qualify");
+        check(AssaultTargeting.priority(AssaultTargeting.Type.HQ)
+                        < AssaultTargeting.priority(AssaultTargeting.Type.PLAYER),
+                "An engageable HQ has top weapon priority");
+        check(AssaultTargeting.priority(AssaultTargeting.Type.PLAYER)
+                        < AssaultTargeting.priority(AssaultTargeting.Type.DEFENSE),
+                "Players precede registered defense targets");
+        check(AssaultTargeting.priority(AssaultTargeting.Type.DEFENSE)
+                        < AssaultTargeting.priority(AssaultTargeting.Type.INFRASTRUCTURE),
+                "Defense targets precede infrastructure targets without a route-corridor gate");
     }
     private static void checkCombatProfiles() {
         var range = new WeaponRangeProfile(8, 28, 40, 96, 1.5);
@@ -197,9 +220,9 @@ public final class EncounterChecks {
                 "Weapon range has inclusive physical limits");
         check(range.preferred(28) && range.preferred(40) && !range.preferred(41),
                 "Preferred engagement band is distinct from maximum range");
-        var trajectory = new TrajectoryProfile(TrajectoryType.DIRECT_LOW_ARC, 4, 0.025, 0.01, 80);
+        var trajectory = new TrajectoryProfile(TrajectoryType.DIRECT_LOW_ARC, 7.5, 0.025, 0.01, 80);
         var weapon = new WeaponProfile("main_turret", WeaponBehavior.INDEPENDENT_TURRET, range,
-                trajectory, true, 3, null);
+                trajectory, true, null);
         var profile = new VehicleCombatProfile("test_balloon", "Test Ballon", VehicleFamily.HOVER_AIRSHIP,
                 "hover_airship", java.util.List.of(weapon));
         CompoundTag context = new CompoundTag();
@@ -212,11 +235,7 @@ public final class EncounterChecks {
                 && WeaponRuntime.incrementBlocker(state, 42L) == 2
                 && WeaponRuntime.incrementBlocker(state, 84L) == 1,
                 "Per-block diagnostics remain independent");
-        check(AssaultController.breachAllowed(0, weapon.breachShotLimit())
-                && AssaultController.breachAllowed(2, weapon.breachShotLimit())
-                && !AssaultController.breachAllowed(3, weapon.breachShotLimit())
-                && !AssaultController.breachAllowed(4, weapon.breachShotLimit()),
-                "Breaching budget is capped across changing blocker blocks");
+        check(weapon.breachCapable(), "Breaching capability has no lifetime shot limit");
         check(AssaultController.reached(Vec3.ZERO, new Vec3(2.99, 0, 0))
                 && !AssaultController.reached(Vec3.ZERO, new Vec3(3, 0, 0)),
                 "Route completion and engagement share one arrival tolerance");
