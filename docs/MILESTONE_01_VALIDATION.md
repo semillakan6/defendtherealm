@@ -26,6 +26,22 @@ absence, weighted defeat/splitting, cancellation, and cleanup. Because a headles
 GameTest has no rendered clients, visible turret agreement on both dedicated
 clients remains a manual acceptance item.
 
+## Severed-turret cleanup correction — 2026-09-17
+
+Manual encounter `a5655812-ce0e-4db1-90b7-d6c90580fed8` exposed a cleanup gap:
+after the turret separated, the root fragment reported zero mounts every tick,
+and the final effect was visible on only one fragment. Weapon separation now
+suspends combat with a stable diagnostic instead of producing an exception loop.
+Defeat applies its effect to every loaded owned fragment and cleanup performs
+fixed-point passes that reclaim encounter-tagged or lineage-owned descendants
+created during removal.
+
+The 16:32:20 physical rerun passed all four required GameTests. Its damage case
+created multiple owned fragments, asserted that more than one fragment received
+the final effect, completed with `owned=[]`, and found no encounter-tagged Sable
+sublevel afterward. The exact hand-severed turret/hull sequence remains open for
+one visual in-world retest before closing this regression.
+
 ## Navigation and turret correction — 2026-09-15
 
 The real-world retest exposed remaining coupling after the previous automated
@@ -279,7 +295,7 @@ Perform each case in a disposable world copy and save its `latest.log`.
    opened the breached lane. Keep this item open until a two-client manual run confirms the
    visible orbit and a dynamically added route obstruction.
 - [x] **HQ priority and hostile opportunity fire.** The automated physical
-   fixture places a Survival `ServerPlayer` between the spawn and HQ. The turret
+   fixture places a Survival `ServerPlayer` more than 48 blocks off the HQ route. The turret
    selected that player independently, CBC reduced health from 20 to 6, and the
    ship resumed its original HQ route before destroying the marker. In manual
    play, continue to verify the same presentation for moving players. Creative
@@ -296,6 +312,12 @@ Perform each case in a disposable world copy and save its `latest.log`.
 - [x] **Weapon failure.** Destroying the autocannon mount stopped the controller
    with `WEAPON_FAILURE`; split ownership was inherited and cleanup released the
    vehicle, fragment, projectiles, and tickets.
+- [ ] **Severed-turret defeat cleanup.** On the corrected build, detach the
+   turret, then cross the 40% damage threshold. Every owned hull/turret fragment
+   must show the defeat effect and disappear; `/dtr prototype vehicles` must
+   show no encounter corpse and logs must not repeat the former “expects 1
+   cannon mount, found 0” exception. Automated multi-fragment cleanup passes,
+   but this exact manual topology must be observed once.
 - [ ] **Passenger safety during cancellation.** Ride the vehicle and cancel it.
    The player must be
    ejected/preserved. Repeat

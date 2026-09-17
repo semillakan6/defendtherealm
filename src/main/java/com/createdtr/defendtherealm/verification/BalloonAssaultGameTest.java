@@ -261,7 +261,13 @@ public final class BalloonAssaultGameTest {
         if (encounter.state() == Encounter.State.COMPLETED) {
             helper.assertTrue(encounter.reason() == Encounter.Reason.DEFEATED, "Defeat reason persists");
             helper.assertTrue(context.getBoolean("finalBlast"), "Final non-terrain-damaging blast ran");
+            helper.assertTrue(context.getInt("finalBlastFragments") > 1,
+                    "Every loaded owned fragment receives the defeat effect");
             helper.assertTrue(encounter.owned().isEmpty(), "All owned sublevels were acknowledged removed");
+            var container = SubLevelContainer.getContainer(helper.getLevel());
+            helper.assertTrue(container == null || container.getAllSubLevels().stream().noneMatch(ship ->
+                            com.createdtr.defendtherealm.integration.sable.EncounterIntegrity.belongsTo(encounter, ship)),
+                    "No tagged encounter fragment remains in Sable after defeat cleanup");
             helper.assertTrue(context.getInt("forcedChunkCount") == 0 && context.getBoolean("ticketsReleased"),
                     "All encounter chunk tickets were released");
             startCancellationScenario(helper, BlockPos.containing(context.getCompound("spawn").getInt("x"),

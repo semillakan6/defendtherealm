@@ -24,6 +24,16 @@ vehicle on change and by heartbeat, so the nested CBC turret renders the pose us
 for authorization. CBC spent-cartridge results are replaced with an empty stack
 inside only the authorized encounter fire call, before an item entity can exist.
 
+A later manual damage test severed the turret before defeat. The log showed the
+remaining hull repeatedly failing strict mount binding while only one fragment
+received the final effect. Cleanup now treats a missing/separated weapon as a
+diagnosed suspended attacker instead of throwing each tick. At defeat it emits
+the effect for every loaded owned fragment, then repeatedly reconciles encounter
+tags and Sable split lineage while removing fragments until no further owned
+descendant appears. The physical split GameTest verifies multiple fragment
+effects, an empty ownership set, and no tagged Sable residue; the exact manual
+turret-severing sequence still needs one in-world confirmation.
+
 - The exact user-authored `Test Ballon.excraft` v8 archive is bundled as a
   versioned fixture. It contains one Sable sublevel, ten honey-glue regions, one
   restored CBC pitch contraption and 61 finite AP autocannon cartridges.

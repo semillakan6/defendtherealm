@@ -86,7 +86,7 @@ public final class AssaultController {
                 if (drive != null) PrototypeWeapon.stopAll(drive.ship());
                 com.createdtr.defendtherealm.integration.cbc.ShotAccounting.cleanupProjectiles(level, data);
                 EncounterChunkTickets.release(level, data);
-                var cleanup = SableVehicles.removeOwned(level, encounter);
+                var cleanup = SableVehicles.removeOwned(level, data);
                 CompoundTag cleanupContext = data.context();
                 if (cleanup.pending() > 0) {
                     cleanupContext.putInt("cleanupMissingTicks", cleanupContext.getInt("cleanupMissingTicks") + 1);
@@ -132,7 +132,18 @@ public final class AssaultController {
             var combatProfile = VehicleCombatProfiles.requireForTemplate(context.getString("template"));
             WeaponRuntime.initialize(context, combatProfile);
             var weaponProfile = combatProfile.primaryWeapon();
-            CannonMountBlockEntity weaponMount = bindPrimaryMount(ship, combatProfile, context);
+            CannonMountBlockEntity weaponMount;
+            try {
+                weaponMount = bindPrimaryMount(ship, combatProfile, context);
+            } catch (IllegalStateException missingWeapon) {
+                context.putString("controllerFailure", missingWeapon.getMessage());
+                context.putString("controllerStatus", "Weapon separated or destroyed; retaining attacker");
+                context.putBoolean("combatIncapable", true);
+                context.putBoolean("controllerSuspended", true);
+                DRIVES.put(level, new Drive(encounter.id(), ship, current, target, false));
+                data.updateContext(context);
+                return;
+            }
             var weaponReadiness = PrototypeWeapon.readiness(ship, combatProfile.weapons().size());
             if (context.getBoolean("recoveryPending")) {
                 if (!context.contains("recoveryStartedTick")) context.putLong("recoveryStartedTick", now);
@@ -726,7 +737,7 @@ public final class AssaultController {
         context.putBoolean("defeatGrounded", grounded);
         context.putInt("defeatTicksRemaining", (int) Math.max(0, timeout - elapsed));
         if (grounded || elapsed >= timeout) {
-            finalBlast(level, ship, encounter, context);
+            finalBlast(level, encounter, context);
             DRIVES.remove(level);
             encounter.advance(Encounter.State.CLEANING_UP);
         } else {
@@ -766,14 +777,25 @@ public final class AssaultController {
         return false;
     }
 
-    private static void finalBlast(ServerLevel level, ServerSubLevel ship, Encounter encounter, CompoundTag context) {
-        Vec3 center = new Vec3(ship.logicalPose().position().x(), ship.logicalPose().position().y(),
-                ship.logicalPose().position().z());
-        level.sendParticles(ParticleTypes.EXPLOSION_EMITTER, center.x, center.y, center.z, 1, 0, 0, 0, 0);
-        level.playSound(null, BlockPos.containing(center), SoundEvents.GENERIC_EXPLODE.value(),
-                SoundSource.HOSTILE, 4.0F, 0.8F);
-        AABB area = bounds(ship).inflate(2);
-        for (var entity : level.getEntities(null, area)) {
+    private static void finalBlast(ServerLevel level, Encounter encounter, CompoundTag context) {
+        var container = SubLevelContainer.getContainer(level);
+        List<ServerSubLevel> fragments = container == null ? List.of() : container.getAllSubLevels().stream()
+                .filter(ship -> !ship.isRemoved() && encounter.owned().contains(ship.getUniqueId()))
+                .toList();
+        List<AABB> areas = new ArrayList<>();
+        for (ServerSubLevel fragment : fragments) {
+            Vec3 center = new Vec3(fragment.logicalPose().position().x(), fragment.logicalPose().position().y(),
+                    fragment.logicalPose().position().z());
+            level.sendParticles(ParticleTypes.EXPLOSION_EMITTER, center.x, center.y, center.z, 1, 0, 0, 0, 0);
+            level.playSound(null, BlockPos.containing(center), SoundEvents.GENERIC_EXPLODE.value(),
+                    SoundSource.HOSTILE, 4.0F, 0.8F);
+            areas.add(bounds(fragment).inflate(2));
+        }
+        context.putInt("finalBlastFragments", fragments.size());
+        AABB combined = areas.stream().reduce(AABB::minmax).orElse(null);
+        for (var entity : combined == null ? List.<net.minecraft.world.entity.Entity>of()
+                : level.getEntities(null, combined)) {
+            if (areas.stream().noneMatch(area -> area.intersects(entity.getBoundingBox()))) continue;
             if (entity.getPersistentData().hasUUID("dtrEncounter")
                     && encounter.id().equals(entity.getPersistentData().getUUID("dtrEncounter"))
                     && !(entity instanceof Player)) {

@@ -6,6 +6,7 @@ import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import com.createdtr.defendtherealm.encounter.Encounter;
+import com.createdtr.defendtherealm.persistence.EncounterSavedData;
 import net.minecraft.server.level.ServerLevel;
 
 /** Read-only server integration. Discovery never establishes encounter ownership. */
@@ -27,32 +28,34 @@ public final class SableVehicles {
     }
 
     /** Removes only UUIDs already owned by the encounter; unknown/unloaded UUIDs remain pending. */
-    public static Cleanup removeOwned(ServerLevel level, Encounter encounter) {
+    public static Cleanup removeOwned(ServerLevel level, EncounterSavedData data) {
         if (!level.getServer().isSameThread()) throw new IllegalStateException("Vehicle removal requires server thread");
+        Encounter encounter = data.encounter();
+        if (encounter == null) return new Cleanup(0, 0);
         var container = SubLevelContainer.getContainer(level);
         if (container == null) return new Cleanup(0, encounter.owned().size());
 
-        // Capture all currently loaded descendants before removing any parent.
+        // Removing a fragmented parent can synchronously expose another child.
+        // Reconcile tags/lineage and remove in fixed-point passes so a fragment
+        // created during this cleanup cannot escape the initial UUID snapshot.
+        int removed = 0;
         boolean changed;
         do {
             changed = false;
-            for (ServerSubLevel ship : container.getAllSubLevels()) {
-                UUID parent = ship.getSplitFromSubLevel();
-                if (parent != null && encounter.inherit(ship.getUniqueId(), parent)) changed = true;
+            for (ServerSubLevel ship : List.copyOf(container.getAllSubLevels()))
+                if (EncounterIntegrity.claimForCleanup(data, ship)) changed = true;
+            for (UUID id : encounter.owned()) {
+                var candidate = container.getSubLevel(id);
+                if (!(candidate instanceof ServerSubLevel ship) || ship.isRemoved()) continue;
+                com.createdtr.defendtherealm.integration.cbc.PrototypeWeapon.stop(
+                        com.createdtr.defendtherealm.integration.cbc.PrototypeWeapon.find(ship));
+                ship.getPlot().kickAllEntities();
+                container.removeSubLevel(ship, SubLevelRemovalReason.REMOVED);
+                encounter.acknowledgeRemoval(id);
+                removed++;
+                changed = true;
             }
         } while (changed);
-
-        int removed = 0;
-        for (UUID id : encounter.owned()) {
-            var candidate = container.getSubLevel(id);
-            if (!(candidate instanceof ServerSubLevel ship) || ship.isRemoved()) continue;
-            com.createdtr.defendtherealm.integration.cbc.PrototypeWeapon.stop(
-                    com.createdtr.defendtherealm.integration.cbc.PrototypeWeapon.find(ship));
-            ship.getPlot().kickAllEntities();
-            container.removeSubLevel(ship, SubLevelRemovalReason.REMOVED);
-            encounter.acknowledgeRemoval(id);
-            removed++;
-        }
         return new Cleanup(removed, encounter.owned().size());
     }
 

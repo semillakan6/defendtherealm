@@ -29,6 +29,30 @@ public final class EncounterIntegrity {
 
     private EncounterIntegrity() {}
 
+    public static boolean belongsTo(Encounter encounter, ServerSubLevel ship) {
+        CompoundTag user = ship.getUserDataTag();
+        return user != null && user.hasUUID(ENCOUNTER_TAG)
+                && encounter.id().equals(user.getUUID(ENCOUNTER_TAG));
+    }
+
+    /** Cleanup-only recovery for descendants observed after their parent changed or vanished. */
+    public static boolean claimForCleanup(EncounterSavedData data, ServerSubLevel ship) {
+        Encounter encounter = data.encounter();
+        if (encounter == null || ship.isRemoved()) return false;
+        boolean tagged = belongsTo(encounter, ship);
+        UUID parent = ship.getSplitFromSubLevel();
+        if (!tagged && (parent == null || !encounter.owned().contains(parent))) return false;
+        boolean added = !encounter.owned().contains(ship.getUniqueId());
+        encounter.own(ship.getUniqueId());
+        if (!tagged) {
+            CompoundTag user = ship.getUserDataTag() == null ? new CompoundTag() : ship.getUserDataTag().copy();
+            user.putUUID(ENCOUNTER_TAG, encounter.id());
+            ship.setUserDataTag(user);
+        }
+        if (added) data.setDirty();
+        return added;
+    }
+
     @SubscribeEvent
     public static void serverStarting(ServerStartingEvent event) {
         EncounterSavedData data = EncounterSavedData.get(event.getServer());

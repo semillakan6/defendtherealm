@@ -182,7 +182,7 @@ public final class ToolgunPrototypeSpawner {
             tracking.set(false);
             for (UUID id : allocated) encounter.own(id);
             encounter.terminate(Encounter.Reason.INVALID_PLACEMENT);
-            if (!allocated.isEmpty()) com.createdtr.defendtherealm.integration.sable.SableVehicles.removeOwned(level, encounter);
+            if (!allocated.isEmpty()) com.createdtr.defendtherealm.integration.sable.SableVehicles.removeOwned(level, data);
             if (encounter.owned().isEmpty()) encounter.advance(Encounter.State.COMPLETED);
             context.putString("placementFailure", safeMessage(ex));
             data.updateContext(context);
